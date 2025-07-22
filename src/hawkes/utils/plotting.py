@@ -1,0 +1,194 @@
+import math
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+
+from hawkes import models
+
+
+def plot_intensity(
+    model_sim: models.HawkesBase,
+    ti: torch.Tensor,
+    mi: torch.Tensor,
+    T: float = None,
+    M: int = None,
+    grid: int = 1000,
+    output: str = "intensity_plot.png",
+    plot_events: bool = True,
+):
+    """
+    Plot the intensity of a Hawkes process given an event sequence.
+    """
+
+    if T is None:
+        T = ti[-1]
+    if M is None:
+        M = model_sim.M
+
+    t = torch.linspace(0, T, grid, device=ti.device)
+    with torch.no_grad():
+        intensity, R = model_sim.event_intensity(ti, mi, return_states=True)
+        t_intensity = model_sim.intensity_at(t, ti.squeeze(), mi, R).cpu()
+
+    t = t.cpu()
+    ti = ti.cpu()
+    mi = mi.cpu()
+    intensity = intensity.cpu()
+
+    fig, ax = plt.subplots(M, 1, figsize=(9, M), sharex=True, sharey=False)
+
+    for g in range(M):
+        mask = mi.squeeze() == g
+        times_g = ti.squeeze()[mask]
+
+        ax[g].plot(t.squeeze(), t_intensity[:, g], label=f"Account {g}", linewidth=1)
+        # ax[g].plot(times_g, intensity[mask, g], ".")  # Experimental: plot event points
+        ax[g].set_xlim(0, T)
+        ax[g].set_ylim(0, torch.ceil(torch.max(intensity)))
+
+        if g > 0:
+            ax[g].set_yticklabels([])
+            ax[g].set_yticks([])
+
+        if g == M - 1:
+            ax[g].set_xlabel("Time (arbitrary)")
+
+        if plot_events:
+            for eventt in times_g:
+                ax[g].axvline(eventt.item(), color="r", linestyle="-", linewidth=0.5)
+
+        label = f"Account {g}" if g == 0 else g
+        ax[g].text(
+            0.01,
+            0.88,
+            label,
+            transform=ax[g].transAxes,
+            ha="left",
+            va="top",
+            bbox=dict(
+                facecolor="lightgray", edgecolor="black", boxstyle="round,pad=0.2"
+            ),
+        )
+
+    fig.tight_layout()
+    fig.subplots_adjust(hspace=0)
+    fig.text(0.0, 0.5, "Intensity", va="center", rotation="vertical")
+    plt.savefig(output, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_diagnostic(
+    true_alpha: torch.Tensor,
+    estimated_alpha: torch.Tensor,
+    output: str = "diagnostic_plot.png",
+):
+    # List of matplotlib's diverging colormaps
+    diverging_cmaps = {
+        "PiYG",
+        "PRGn",
+        "BrBG",
+        "PuOr",
+        "RdGy",
+        "RdBu",
+        "RdYlBu",
+        "RdYlGn",
+        "Spectral",
+        "coolwarm",
+        "bwr",
+        "seismic",
+    }
+
+    plt.style.use("seaborn-v0_8-white")
+    fig, axes = plt.subplots(1, 3, figsize=(24, 6))
+
+    matrices = [
+        (true_alpha, "True Interaction Matrix", "Reds"),
+        (estimated_alpha, "Estimated Interaction Matrix", "Reds"),
+        (estimated_alpha - true_alpha, "Error", "seismic"),
+    ]
+
+    for ax, (matrix, title, cmap) in zip(axes, matrices):
+        cmap_ = plt.get_cmap(cmap).copy()
+        cmap_.set_bad("white")
+        if cmap in diverging_cmaps:
+            # For diverging colormaps, center at zero with symmetric limits
+            abs_max = max(abs(matrix.max()), abs(matrix.min()))
+            vmin, vmax = -abs_max, abs_max
+            heatmap = ax.imshow(matrix, cmap=cmap_, aspect="auto", vmin=vmin, vmax=vmax)
+        else:
+            heatmap = ax.imshow(matrix, cmap=cmap_, aspect="auto")
+
+        ax.set_title(title)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        fig.colorbar(heatmap, ax=ax, fraction=0.046, pad=0.04)
+
+    plt.savefig(output, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_residuals(
+    model,
+    model_sim,
+    T,
+    max_events,
+    num_simulations=10,
+    output: str = "residual_plot.png",
+):
+    # TODO: Residuals are not being generated/plotted correctly, and too much memory is used
+
+    plt.figure(figsize=(8, 8))
+    plt.gca().set_aspect("equal", adjustable="box")
+
+    hawkes_rmse_list = []
+    poisson_rmse_list = []
+
+    for i in range(num_simulations):
+        ti_new, mi_new = model_sim.simulate(T, max_events=max_events)
+        ts = torch.linspace(2, T, 100)
+        EN, N = [], []
+
+        for t in ts:
+            with torch.no_grad():
+                EN_t = model.integrated_intensity(t, ti_new, mi_new)
+                EN.append(EN_t)
+            N.append((ti_new < t).sum().item())
+
+        EN = torch.stack(EN).cpu()
+        N = torch.tensor(N)
+
+        ti_new = ti_new.cpu()
+        mi_new = mi_new.cpu()
+
+        # Hawkes model residuals
+        resid_hawkes = EN - N
+        hawkes_rmse = (resid_hawkes**2).mean().sqrt().item()
+        hawkes_rmse_list.append(hawkes_rmse)
+        plt.plot(N, resid_hawkes, "r-", alpha=0.2)
+
+        # Poisson model residuals
+        lam0 = ti_new.shape[1] / T
+        N_poisson = lam0 * ts
+        resid_poisson = N_poisson - N
+        poisson_rmse = (resid_poisson**2).mean().sqrt().item()
+        poisson_rmse_list.append(poisson_rmse)
+        plt.plot(N, resid_poisson, "b-", alpha=0.2)
+
+    # Calculate average RMSE for both models
+    avg_hawkes_rmse = np.mean(hawkes_rmse_list)
+    avg_poisson_rmse = np.mean(poisson_rmse_list)
+
+    # Add legend with average RMSE
+    plt.plot([], [], "r-", label=f"Hawkes (Avg RMSE={avg_hawkes_rmse:.2f})")
+    plt.plot([], [], "b-", label=f"Poisson (Avg RMSE={avg_poisson_rmse:.2f})")
+
+    plt.xlabel("Observed " + r"$N(t)$")
+    plt.ylabel(r"$E[N(t)] - N(t)$")
+    plt.ylim(-500, 500)
+    plt.xlim(0, max(N))  # Set x-axis limit based on maximum observed events
+    plt.grid(True, linestyle="--", alpha=0.7)
+    plt.legend(loc="upper left")
+    plt.title(f"Residuals for {num_simulations} Simulations")
+    plt.tight_layout()
+    plt.savefig(output, dpi=300, bbox_inches="tight")
+    plt.close()
