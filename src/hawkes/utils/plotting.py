@@ -1,6 +1,6 @@
 import math
 import torch
-import numpy as np
+import statistics
 import matplotlib.pyplot as plt
 
 from hawkes import models
@@ -27,8 +27,8 @@ def plot_intensity(
 
     t = torch.linspace(0, T, grid, device=ti.device)
     with torch.no_grad():
-        intensity, R = model_sim.event_intensity(ti, mi, return_states=True)
-        t_intensity = model_sim.intensity_at(t, ti.squeeze(), mi, R).cpu()
+        intensity, R = model_sim.intensity_at_events(ti, mi, return_states=True)
+        t_intensity = model_sim.intensity_at_t(t, ti.squeeze(), mi, R).cpu()
 
     t = t.cpu()
     ti = ti.cpu()
@@ -41,6 +41,10 @@ def plot_intensity(
         mask = mi.squeeze() == g
         times_g = ti.squeeze()[mask]
 
+        if plot_events:
+            for eventt in times_g:
+                ax[g].axvline(eventt.item(), color="r", linestyle="-", linewidth=0.5)
+
         ax[g].plot(t.squeeze(), t_intensity[:, g], label=f"Account {g}", linewidth=1)
         # ax[g].plot(times_g, intensity[mask, g], ".")  # Experimental: plot event points
         ax[g].set_xlim(0, T)
@@ -52,10 +56,6 @@ def plot_intensity(
 
         if g == M - 1:
             ax[g].set_xlabel("Time (arbitrary)")
-
-        if plot_events:
-            for eventt in times_g:
-                ax[g].axvline(eventt.item(), color="r", linestyle="-", linewidth=0.5)
 
         label = f"Account {g}" if g == 0 else g
         ax[g].text(
@@ -175,8 +175,8 @@ def plot_residuals(
         plt.plot(N, resid_poisson, "b-", alpha=0.2)
 
     # Calculate average RMSE for both models
-    avg_hawkes_rmse = np.mean(hawkes_rmse_list)
-    avg_poisson_rmse = np.mean(poisson_rmse_list)
+    avg_hawkes_rmse = statistics.fmean(hawkes_rmse_list)
+    avg_poisson_rmse = statistics.fmean(poisson_rmse_list)
 
     # Add legend with average RMSE
     plt.plot([], [], "r-", label=f"Hawkes (Avg RMSE={avg_hawkes_rmse:.2f})")

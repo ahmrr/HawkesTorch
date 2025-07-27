@@ -92,7 +92,7 @@ class HawkesBase(torch.nn.Module, ABC):
 
         with torch.no_grad():
             while t < T and ti.shape[1] < max_events:
-                λ_star = self.recursive_intensity(t, None, ti, mi, R_λ).sum()
+                λ_star = self.intensity_at_next_event(t, None, ti, mi, R_λ).sum()
 
                 τ = torch.distributions.Exponential(λ_star).sample()
                 t = t + τ.item()
@@ -100,7 +100,9 @@ class HawkesBase(torch.nn.Module, ABC):
                 if t > T:
                     break
 
-                λ_t, R = self.recursive_intensity(t, None, ti, mi, R_λ, next_state=True)
+                λ_t, R = self.intensity_at_next_event(
+                    t, None, ti, mi, R_λ, next_state=True
+                )
                 λ_star_new = λ_t.sum()
 
                 r = λ_star_new / λ_star
@@ -163,8 +165,10 @@ class HawkesBase(torch.nn.Module, ABC):
         for epoch in range(fit_config.num_steps):
             optimizer.zero_grad()
 
-            nll = self.nll(T, ti, mi, batch_size=fit_config.batch_size)
-            # assert torch.all(torch.isclose(self.nll_old(T, ti, mi), nll))
+            # Calculate NLL across entire data and perform the backward pass
+            nll = self.nll(
+                T, ti, mi, batch_size=fit_config.batch_size, compute_backward=True
+            )
 
             if fit_config.l1_penalty > 0:
                 l1_mu = torch.where(self.mu < fit_config.l1_hinge, self.mu, 0).sum()
@@ -192,18 +196,6 @@ class HawkesBase(torch.nn.Module, ABC):
                     self.logger.error(f"Gradient of {n} is nan at epoch {epoch + 1}")
                     raise ValueError(f"Gradient of {n} is nan")
 
-            # if epoch == 1:
-            #     for n, p in self.named_parameters():
-            #         # self.logger.info(f"Gradient of {n} is {p.grad}")
-            #         # print(f"Value of {n} is {p}")
-            #         pass
-            #     print(f"mu is {self.mu}")
-            #     print(f"alpha is {self.alpha}")
-            #     print(f"gamma is {self.gamma}")
-            #     # print(nll_neg_logsum, nll_int)
-            #     print(T)
-            #     exit(1)
-
             optimizer.step()
             losses.append(loss.item())
 
@@ -213,13 +205,7 @@ class HawkesBase(torch.nn.Module, ABC):
             # Progress logging at monitor intervals
             if (epoch + 1) % fit_config.monitor_interval == 0:
                 with torch.no_grad():
-                    full_nll = self.nll(
-                        T,
-                        ti,
-                        mi,
-                        batch_size=fit_config.batch_size,
-                        compute_backward=False,
-                    )
+                    full_nll = self.nll(T, ti, mi, batch_size=fit_config.batch_size)
                     sparsity_factor = (
                         self.alpha.isclose(
                             torch.zeros_like(self.alpha), atol=0.03
@@ -264,7 +250,7 @@ class HawkesBase(torch.nn.Module, ABC):
         ti: torch.Tensor,
         mi: torch.Tensor,
         batch_size=None,
-        compute_backward=True,
+        compute_backward=False,
     ) -> float:
         """
         Compute negative log-likelihood across the entire data using batching.
@@ -304,7 +290,7 @@ class HawkesBase(torch.nn.Module, ABC):
                 batch_integrated_intensity.backward()
 
             # TODO: Detaching prev_state causes incorrect gradients because of dependency
-            batch_intensity, prev_state = self.event_intensity(
+            batch_intensity, prev_state = self.intensity_at_events(
                 ti,
                 mi,
                 full_intensity=False,
@@ -321,59 +307,6 @@ class HawkesBase(torch.nn.Module, ABC):
             nll_neg_logsum += batch_logsum
 
         return nll_neg_logsum + nll_int
-
-    def nll_old(
-        self, T, ti: torch.Tensor, mi: torch.Tensor, batch_size=None, debug=False
-    ) -> float:
-        """
-        Compute negative likelihood across the entire data using batching.
-
-        Args:
-            T: Final (maximum) event time
-            ti: Tensor of event times with shape (1, N, 1)
-            mi: Tensor of event types with shape (N,)
-            batch_size: Number of events to use in each batch. If None, use all events
-
-        """
-
-        N = ti.shape[1]
-        batch_size = batch_size or N
-
-        # Negative log-sum and integral terms in negative likelihood
-        nll_neg_logsum = 0.0
-        nll_int = 0.0
-
-        # Calculate intensity and integrated intensity in batches
-        prev_state = None
-        for batch_start in range(0, N, batch_size):
-            Nb = min(batch_size, N - batch_start)
-
-            nll_int += self.integrated_intensity(
-                T, ti, mi, batching=True, batch_start=batch_start, batch_size=Nb
-            )
-
-            batch_intensity, prev_state = self.event_intensity(
-                ti,
-                mi,
-                full_intensity=False,
-                batching=True,
-                batch_start=batch_start,
-                batch_size=Nb,
-                batch_prev_state=prev_state,
-            )
-            nll_neg_logsum -= torch.sum(torch.log(batch_intensity))
-            # print(f"Intensity tensor size: {batch_intensity.element_size() * batch_intensity.nelement()}")
-
-        # Debug assertion to check correctness of intensities
-        # sum_intensity = self.intensity(ti.permute(1, 0, 2), mi, ti, mi)
-        # assert torch.all(torch.isclose(intensity, sum_intensity))
-        # assert torch.isclose(nll_int, self.integrated_intensity(T, ti, mi))
-
-        if debug:
-            print("\tEvent time loss:", -nll_neg_logsum)
-            print("\tIntegral loss:", nll_int)
-
-        return (nll_neg_logsum + nll_int) / N
 
     def integrated_intensity(
         self,
@@ -403,7 +336,7 @@ class HawkesBase(torch.nn.Module, ABC):
         else:
             return excitation
 
-    def recursive_intensity(
+    def intensity_at_next_event(
         self,
         t: float,
         m: int | None,
@@ -449,7 +382,7 @@ class HawkesBase(torch.nn.Module, ABC):
         else:
             return λ
 
-    def event_intensity(
+    def intensity_at_events(
         self,
         ti: torch.Tensor,
         mi: torch.Tensor,
@@ -461,8 +394,8 @@ class HawkesBase(torch.nn.Module, ABC):
         return_states=False,
     ) -> torch.Tensor:
         """
-        Compute intensity of the Hawkes process using an optimized state-augmented matrix multiplication.
-        This should only be used for NLL calculations. To simulate data, use the recursive version.
+        Compute intensity of the Hawkes process at events ti using an optimized state-augmented matrix multiplication.
+        This should only be used for NLL calculations; to simulate data, use the recursive version.
 
         Args:
             ti: Tensor of all event times, of shape (1, N, 1)
@@ -475,7 +408,7 @@ class HawkesBase(torch.nn.Module, ABC):
             return_states: Whether to return the full state vector R, required for calculating intensity at a time.
 
         Returns:
-            Intensity of shape (N, M) or (N, 1), Each element is intensity event(s) strictly less than time t_i
+            Intensities at each time ti, of shape (N, M) if full_intensity is True or (N, 1) otherwise.
 
         """
 
@@ -543,7 +476,7 @@ class HawkesBase(torch.nn.Module, ABC):
         else:
             return λ
 
-    def intensity_at(self, t, ti, mi, R: torch.Tensor = None):
+    def intensity_at_t(self, t, ti, mi, R: torch.Tensor = None):
         """
         Computes the intensity at (and including) times that are not necessarily events.
 
@@ -554,22 +487,19 @@ class HawkesBase(torch.nn.Module, ABC):
             R: Tensor of intensity states saved during intensity calculation at each ti and mi. If None, this is computed internally.
 
         Returns:
-            Intensity of shape (t.shape[0], M)
+            Intensities at each time t, of shape [t.shape[0], M].
 
         """
 
         if R is None:
             with torch.no_grad():
-                _, R = self.event_intensity(ti, mi, return_states=True)
+                _, R = self.intensity_at_events(ti, mi, return_states=True)
 
         # ti[idx] is the event that happens right before the corresponding t
         idx = torch.searchsorted(ti, t).to(ti.device) - 1  # Shape: t.shape
         after_first_event = idx >= 0
         idx_ = idx[after_first_event]
         t_ = t[after_first_event]  # Base intensity for values before the first event
-
-        # Debug assertions
-        assert idx.shape == t.shape
 
         exp_decay = torch.exp(
             -self.gamma * (t_ - ti[idx_]).unsqueeze(-1)
@@ -594,7 +524,7 @@ class HawkesBase(torch.nn.Module, ABC):
             dim=0,
         )  # Shape: [t.shape, M]
 
-    def intensity(
+    def intensity_reference_implementation(
         self,
         t: torch.Tensor | float,
         m: torch.Tensor | int | None,
@@ -602,7 +532,17 @@ class HawkesBase(torch.nn.Module, ABC):
         mi: torch.Tensor,
         right_limit=False,
     ) -> torch.Tensor:
-        """Compute intensity of the Hawkes process."""
+        """
+        Reference implementation: calculates the intensity in a manner akin to the intensity formula.
+
+        Args:
+            t: Times to calculate intensity at.
+            m: The node to return the intensity for at each time t. If None, return intensity for all nodes.
+            ti: Tensor of event times.
+            mi: Tensor of event nodes.
+            right_limit: If True, calculates the intensity at each event including the event itself.
+        """
+
         if not isinstance(t, torch.Tensor):
             if not isinstance(t, float):
                 raise ValueError(f"t must be a float or torch.Tensor but got {type(t)}")

@@ -27,20 +27,20 @@ parser.add_argument(
 parser.add_argument(
     "--N",
     type=int,
-    default=1000,
-    help="Set number of simulated events (default: N = 1000)",
+    default=2000,
+    help="Set number of simulated events (default: N = 2000)",
 )
 parser.add_argument(
     "--M",
     type=int,
-    default=4,
-    help="Set number of event types (default: M = 4)",
+    default=10,
+    help="Set number of event types (default: M = 10)",
 )
 parser.add_argument(
     "--Nb",
     type=int,
-    default=50,
-    help="Set batch size (default: Nb = 50)",
+    default=None,
+    help="Set batch size (default: batching is disabled)",
 )
 parser.add_argument(
     "--device",
