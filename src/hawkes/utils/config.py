@@ -57,8 +57,9 @@ class Transformation:
     inverse: Callable[[torch.Tensor], torch.Tensor]
 
 
-def _softplus_inv(x):
-    return x + torch.log(-torch.expm1(-x))
+def _softplus_inv(y):
+    """Numerically stable softplus inverse that uses a linear approximation for large x"""
+    return torch.where(y > 20, y, torch.log(torch.expm1(y)))
 
 
 EXP = Transformation(forward=torch.exp, inverse=torch.log)
