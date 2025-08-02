@@ -57,8 +57,12 @@ class Transformation:
     inverse: Callable[[torch.Tensor], torch.Tensor]
 
 
+def _softplus_inv(x):
+    return x + torch.log(-torch.expm1(-x))
+
+
 EXP = Transformation(forward=torch.exp, inverse=torch.log)
 SOFTPLUS = Transformation(
     forward=torch.nn.functional.softplus,
-    inverse=lambda x: x + torch.log(-torch.expm1(-x)),
+    inverse=_softplus_inv,
 )
