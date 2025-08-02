@@ -14,10 +14,11 @@ def state_mult(B: torch.Tensor, A: torch.Tensor):
         [S    V]
 
     Args:
-     - B: right-multiplication tensor of shape [R, n2, K, M+1] (if doing prefix scan)
-     - A: left-multiplication tensor of shape [R, n1, K, M+1]
+        B: right-multiplication tensor of shape [R, n2, K, M+1] (if doing prefix scan)
+        A: left-multiplication tensor of shape [R, n1, K, M+1]
 
-    Returns: A @ B considering state multiplication
+    Returns:
+        A @ B considering state multiplication
 
     """
 
@@ -48,6 +49,7 @@ def prefix_scan(x, prefix_func, dim=0, pad_value=0):
     >>> x = torch.randn(n, d, d) / (d**0.5)       # n square matrices
     >>> y = prefix_scan(x, torch.matmul, dim=-3)  # cumulative matmul
     """
+    
     x = x.movedim(dim, -1)  # for easier indexing
     other_dims, seq_len = (x.shape[:-1], x.size(-1))
     n_powers_of_2 = int(math.ceil(math.log2(seq_len)))
@@ -88,6 +90,7 @@ def reduce_scan(x, reduce_func, dim=0):
     >>> x = torch.randn(n, d, d) / (d**0.5)       # n square matrices
     >>> y = reduce_scan(x, torch.matmul, dim=-3)  # matmul of all matrices
     """
+
     x = x.movedim(dim, -1)  # for easier indexing
     other_dims, seq_len = (x.shape[:-1], x.size(-1))
     n_powers_of_2 = int(math.ceil(math.log2(seq_len)))

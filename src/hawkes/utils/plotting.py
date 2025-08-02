@@ -18,6 +18,16 @@ def plot_intensity(
 ):
     """
     Plot the intensity of a Hawkes process given an event sequence.
+
+    Args:
+        model_sim: The model used to simulate the data. Use an model with chosen parameter values or a learned model for real data.
+        M: Number of nodes
+        T: End time of event sequence observation period
+        ti: Tensor of event times with shape (1, N, 1)
+        mi: Tensor of event types with shape (N,)
+        grid: Resolution of plot; i.e., how many times to plot the intensity for
+        output: Output location for the plot
+        plot_events: Whether to mark the location of events on the plot
     """
 
     if T is None:
@@ -82,6 +92,15 @@ def plot_diagnostic(
     estimated_alpha: torch.Tensor,
     output: str = "diagnostic_plot.png",
 ):
+    """
+    A diagnostic plot comparing an arbitrarily chosen or known-to-be-true interaction matrix with a learned one.
+
+    Args:
+        true_alpha: The baseline interaction matrix
+        estimated_alpha: The comparison interaction matrix
+        output: Output location for the plot
+    """
+
     # List of matplotlib's diverging colormaps
     diverging_cmaps = {
         "PiYG",
@@ -135,7 +154,18 @@ def plot_residuals(
     num_simulations=10,
     output: str = "residual_plot.png",
 ):
-    # TODO: Residuals are not being generated/plotted correctly, and too much memory is used
+    """
+    Simulate data from a simulation model and plot the residuals of a fitted model, and compare the residuals to that of a Poisson process.
+
+    Args:
+        model: The learned model
+        model_sim: The model to use for simulating data
+        T: End time of event sequence observation period
+        max_events: The maximum number of events to consider in the residual plot
+        num_simulations: number of simulation rounds to perform; i.e., number of calculated residual curves
+    """
+
+    # TODO: too much memory is used for plotting residuals
 
     plt.figure(figsize=(8, 8))
     plt.gca().set_aspect("equal", adjustable="box")

@@ -54,6 +54,13 @@ parser.add_argument(
     help="Set to enable deterministic simulation (default: disabled)",
 )
 parser.add_argument(
+    "--model-type",
+    type=str,
+    default="low-rank",
+    choices=["full-rank", "low-rank", "upper-triangular"],
+    help="What type of Hawkes model parametrization to use (default: low-rank)",
+)
+parser.add_argument(
     "--intensity-plot",
     type=str,
     default="outputs/intensity_plot.png",
@@ -93,6 +100,7 @@ model_sim = models.HawkesFullRank(
     debug_config=config.HawkesDebugConfig(deterministic_sim=args.deterministic_sim),
 ).to(args.device)
 
+
 # Set base excitation and interaction rates according to fixed sim params
 model_sim.mu = torch.tensor(sim_mu).to(args.device)
 model_sim.alpha = (
@@ -123,14 +131,31 @@ est_init_scale = 0.01
 est_rank = 3
 
 # Fit estimation model
-model_est = models.HawkesLowRank(
-    M=args.M,
-    gamma=torch.tensor(est_gamma).to(args.device),
-    rank=est_rank,
-    init_scale=est_init_scale,
-    gamma_param=True,
-    transformation="softplus",
-)
+match args.model_type:
+    case "full-rank":
+        model_est = models.HawkesFullRank(
+            M=args.M,
+            gamma=torch.tensor(est_gamma).to(args.device),
+            init_scale=est_init_scale,
+            gamma_param=True,
+        ).to(args.device)
+    case "low-rank":
+        model_est = models.HawkesLowRank(
+            M=args.M,
+            gamma=torch.tensor(est_gamma).to(args.device),
+            rank=est_rank,
+            init_scale=est_init_scale,
+            gamma_param=True,
+        ).to(args.device)
+    case "upper-triangular":
+        model_est = models.HawkesUpperTriangular(
+            M=args.M,
+            gamma=torch.tensor(est_gamma).to(args.device),
+            rank=est_rank,
+            init_scale=est_init_scale,
+            gamma_param=True,
+        ).to(args.device)
+
 _ = model_est.fit(
     1_000_000, ti, mi, fit_config
 )  # Use a large number to capture all events

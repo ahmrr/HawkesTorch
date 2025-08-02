@@ -15,6 +15,14 @@ class HawkesBase(torch.nn.Module, ABC):
     def __init__(
         self, M: int, K: int, device="cpu", debug_config=config.HawkesDebugConfig()
     ):
+        """
+        Args:
+            M: Number of nodes
+            K: Number of exponential decay kernels in intensity function
+            device: Which device the model should live on
+            debug_config: Debug configuration settings
+        """
+
         super().__init__()
         self.M = M
         self.K = K
@@ -24,12 +32,12 @@ class HawkesBase(torch.nn.Module, ABC):
 
         self.logger = logging.getLogger(__name__)
 
-        for param in self.parameters():
-            print(param, param.device)
-
         if debug_config.deterministic_sim:
             torch.manual_seed(42)
             torch.cuda.manual_seed_all(42)
+
+        for param in self.parameters():
+            print(param, param.device)
 
     def state_dict(self, *args, **kwargs):
         """Override state_dict to include current alpha value"""
@@ -79,9 +87,16 @@ class HawkesBase(torch.nn.Module, ABC):
     def gamma(self, value: torch.Tensor):
         pass
 
-    def simulate(self, T, max_events=100):
+    def simulate(self, T: float, max_events=100):
         """
-        Simulate events from the Hawkes process using Ogata's thinning algorithm.
+        Simulate events from the Hawkes process using Ogata's thinning algorithm. Terminates either when event time reaches T or when the number of events reaches max_events.
+
+        Args:
+            T: End time of observation period; i.e., the maximum simulated event time
+            max_events: Maximum number of events to simulate
+
+        Returns:
+            Event sequence (ti, mi) consisting of event-node pairs
         """
 
         t = 0.0
@@ -125,7 +140,7 @@ class HawkesBase(torch.nn.Module, ABC):
 
         return ti, mi
 
-    def fit(self, T, ti, mi, fit_config=config.HawkesFitConfig()):
+    def fit(self, T, ti, mi, fit_config=config.HawkesFitConfig()) -> list:
         """
         Fit the Hawkes process parameters using Maximum Likelihood Estimation.
 
@@ -136,12 +151,12 @@ class HawkesBase(torch.nn.Module, ABC):
             fit_config: Contains model hyperparameters and other configuration values
 
         Returns:
-            list: Training losses at each optimization step
+            List of training losses at each optimization step
         """
 
-        # Log training configuration
         N = ti.shape[1]
 
+        # Log training configuration
         self.logger.info(f"Starting Hawkes process training: {self.__class__.__name__}")
         self.logger.info(
             f"Configuration: M={self.M}, K={self.K}, N={N:,}, steps={fit_config.num_steps}"
@@ -256,12 +271,14 @@ class HawkesBase(torch.nn.Module, ABC):
         Compute negative log-likelihood across the entire data using batching.
 
         Args:
-            T: Final (maximum) event time
+            T: End time of observation period
             ti: Tensor of event times with shape (1, N, 1)
             mi: Tensor of event types with shape (N,)
             batch_size: Number of events to use in each batch. If None, use all events
             perform_backward: Perform backward pass, computing gradients in a batched manner
 
+        Returns:
+            NLL of the model's parameters given the data
         """
 
         N = ti.shape[1]
@@ -310,29 +327,43 @@ class HawkesBase(torch.nn.Module, ABC):
 
     def integrated_intensity(
         self,
-        t: float,
+        T: float,
         ti: torch.Tensor,
         mi: torch.Tensor,
         batching=False,
         batch_start=0,
         batch_size=None,
     ) -> torch.Tensor:
-        """Compute integral of intensity function."""
+        """
+        Compute integral of intensity function across the observation period.
+
+        Args:
+            T: End time of observation period
+            ti: Tensor of event times with shape (1, N, 1)
+            mi: Tensor of event types with shape (N,)
+            batching: Whether to split computaiton of the integral into batches
+            batch_start: If batching, the starting index of the current batch
+            batch_size: If batching, the size of the current batch
+
+        Returns:
+            Intensity function integrated from 0 to T.
+        """
+
         if batching and batch_size and batch_size < ti.shape[1]:
             ti = ti[:, batch_start : (batch_start + batch_size), :]
             mi = mi[batch_start : (batch_start + batch_size)]
 
-        mask = ti < t
+        mask = ti < T
         ti = ti[mask].reshape(1, -1, 1)
         mi = mi[mask.squeeze(0, 2)]
 
         alphas = self.alpha[:, mi].permute(1, 2, 0)[None]
         ti = ti[..., None]
 
-        excitation = torch.sum(alphas * (1 - torch.exp(-self.gamma * (t - ti))))
+        excitation = torch.sum(alphas * (1 - torch.exp(-self.gamma * (T - ti))))
 
         if batching and batch_start == 0 or not batching:
-            return torch.sum(self.mu * t) + excitation
+            return torch.sum(self.mu * T) + excitation
         else:
             return excitation
 
@@ -346,8 +377,7 @@ class HawkesBase(torch.nn.Module, ABC):
         next_state=False,
     ) -> torch.Tensor:
         """
-        Compute the intensity of the next event in a Hawkes process using a recurrence relation.
-        This should only be used for simulating data.
+        Compute the intensity at and including a new next event in a Hawkes process using a recurrence relation. This should only be used for simulating data, or for work-efficient non-parallel computation on the CPU.
 
         Args:
             t: New event time
@@ -410,10 +440,14 @@ class HawkesBase(torch.nn.Module, ABC):
         Returns:
             Intensities at each time ti, of shape (N, M) if full_intensity is True or (N, 1) otherwise.
 
+        Raises:
+            ValueError: If batch_* arguments are given when batching is disabled, or if both return_states and batching are enabled
         """
 
         if not batching and (batch_start or batch_size or batch_prev_state):
             raise ValueError("batch arguments were given when batching is disabled")
+        if batching and return_states:
+            raise ValueError("cannot return states when batching is enabled")
 
         N = ti.shape[1]
 
@@ -478,7 +512,7 @@ class HawkesBase(torch.nn.Module, ABC):
 
     def intensity_at_t(self, t, ti, mi, R: torch.Tensor = None):
         """
-        Computes the intensity at (and including) times that are not necessarily events.
+        Computes the intensity at (and including) times that are not necessarily events. This is useful for plotting the intensity function of an event sequence.
 
         Args:
             t: Tensor of times to compute right-limit intensities at.
@@ -487,8 +521,7 @@ class HawkesBase(torch.nn.Module, ABC):
             R: Tensor of intensity states saved during intensity calculation at each ti and mi. If None, this is computed internally.
 
         Returns:
-            Intensities at each time t, of shape [t.shape[0], M].
-
+            Intensities across all nodes at each time t, of shape (t.shape[0], M).
         """
 
         if R is None:
@@ -533,7 +566,7 @@ class HawkesBase(torch.nn.Module, ABC):
         right_limit=False,
     ) -> torch.Tensor:
         """
-        Reference implementation: calculates the intensity in a manner akin to the intensity formula.
+        Reference implementation: calculates the intensity in a manner akin to the intensity formula. Very inefficient; use a combination of intensity_at_events and intensity_at_t for fast parallel GPU computation or looped intensity_at_next_event calls for work-efficient sequential CPU computation.
 
         Args:
             t: Times to calculate intensity at.
