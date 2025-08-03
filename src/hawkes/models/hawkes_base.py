@@ -7,6 +7,80 @@ from abc import ABC, abstractmethod
 from ..utils import config, _torch_scan
 
 
+class HawkesNLL(torch.autograd.Function, ABC):
+    @staticmethod
+    def forward(
+        ctx: typing.Any,
+        mu: torch.Tensor,
+        alpha: torch.Tensor,
+        gamma: torch.Tensor,
+        M: int,
+        K: int,
+        T: float,
+        ti: torch.Tensor,
+        mi: torch.Tensor,
+        batching=False,
+        batch_start=0,
+        batch_size=None,
+    ):
+        """
+        Compute negative log-likelihood across the entire data using batching.
+
+        Args:
+            TODO: add args
+            T: End time of observation period
+            ti: Tensor of event times with shape (1, N, 1)
+            mi: Tensor of event types with shape (N,)
+            batch_size: NumIt must accept a context ctx as the first argument, followed by any number of arguments (tensors or other types).ber of events to use in each batch. If None, use all events
+            perform_backward: Perform backward pass, computing gradients in a batched manner
+
+        Returns:
+            NLL of the model's parameters given the data
+        """
+
+        N = ti.shape[1]
+        batch_size = batch_size or N
+
+        # Negative log-sum and integral terms in negative likelihood
+        nll_neg_logsum = 0.0
+        nll_int = 0.0
+
+        # Calculate intensity and integrated intensity in batches
+        prev_state = None
+
+        # TODO: Make batching work properly
+        intensity = torch.empty(N)
+        for batch_start in range(0, N, batch_size):
+            Nb = min(batch_size, N - batch_start)
+
+            nll_int += self.integrated_intensity(
+                T, ti, mi, batching=True, batch_start=batch_start, batch_size=Nb
+            )
+
+            batch_intensity, prev_state = self.intensity_at_events(
+                ti,
+                mi,
+                full_intensity=False,
+                batching=True,
+                batch_start=batch_start,
+                batch_size=Nb,
+                batch_prev_state=prev_state,
+            )
+            nll_neg_logsum -= torch.sum(torch.log(batch_intensity))
+            intensity[batch_start : (batch_start + Nb)] = batch_intensity.squeeze()
+
+        ctx.save_for_backward(
+            intensity, torch.tensor(M), torch.tensor(K), torch.tensor(T), ti, mi
+        )
+
+        return (nll_neg_logsum + nll_int) / N
+
+    @staticmethod
+    @abstractmethod
+    def backward(ctx, grad_output):
+        pass
+
+
 class HawkesBase(torch.nn.Module, ABC):
     """
     Abstract base class for Hawkes process implementations.
@@ -177,11 +251,14 @@ class HawkesBase(torch.nn.Module, ABC):
 
         self.logger.info("Starting training loop...")
 
+        fit_time_real = time.perf_counter()
+        torch.cuda.reset_peak_memory_stats()
+
         for epoch in range(fit_config.num_steps):
             optimizer.zero_grad()
 
             # Calculate NLL across entire data and perform the backward pass
-            nll = self.nll(
+            nll = self._compute_nll(
                 T, ti, mi, batch_size=fit_config.batch_size, compute_backward=True
             )
 
@@ -220,7 +297,9 @@ class HawkesBase(torch.nn.Module, ABC):
             # Progress logging at monitor intervals
             if (epoch + 1) % fit_config.monitor_interval == 0:
                 with torch.no_grad():
-                    full_nll = self.nll(T, ti, mi, batch_size=fit_config.batch_size)
+                    full_nll = self._compute_nll(
+                        T, ti, mi, batch_size=fit_config.batch_size
+                    )
                     sparsity_factor = (
                         self.alpha.isclose(
                             torch.zeros_like(self.alpha), atol=0.03
@@ -234,6 +313,9 @@ class HawkesBase(torch.nn.Module, ABC):
                         f"μ_mean={self.mu.mean().item():.4f}, "
                         f"α_mean={self.alpha.mean().item():.4f}"
                     )
+
+        peak_mem_gpu = torch.cuda.max_memory_allocated()
+        fit_time_real = time.perf_counter() - fit_time_real
 
         if self.debug_config.profile_mem_iters:
             mem_file = f"outputs/mem/mem_snapshot_n{N}_m{self.M}_b{batch_size}_e{self.debug_config.profile_mem_iters}.pkl"
@@ -255,13 +337,15 @@ class HawkesBase(torch.nn.Module, ABC):
             f"Training summary: Final loss={losses[-1]:.4f}, "
             f"Loss reduction={loss_reduction:.1f}%, "
             f"Final sparsity={final_sparsity:.3f}"
+            f"Fitting took {fit_time_real}s, "
+            f"Peak memory usage was {peak_mem_gpu // 1e6}MiB"
         )
 
         return losses
 
-    def nll(
+    def _compute_nll(
         self,
-        T,
+        T: float,
         ti: torch.Tensor,
         mi: torch.Tensor,
         batch_size=None,
@@ -446,8 +530,6 @@ class HawkesBase(torch.nn.Module, ABC):
 
         if not batching and (batch_start or batch_size or batch_prev_state):
             raise ValueError("batch arguments were given when batching is disabled")
-        if batching and return_states:
-            raise ValueError("cannot return states when batching is enabled")
 
         N = ti.shape[1]
 
@@ -479,15 +561,17 @@ class HawkesBase(torch.nn.Module, ABC):
 
         # Construct transition matrices M
         # Each element is M_i, and M_1 = prev_state if given
-        M = torch.cat([exp_decay, exp_decay * alphas], dim=2)  # Shape: [K, Nb, M+1]
+        transition_matrices = torch.cat(
+            [exp_decay, exp_decay * alphas], dim=2
+        )  # Shape: [K, Nb, M+1]
         if batch_prev_state is not None:
-            M = torch.cat(
-                [batch_prev_state.unsqueeze(1), M], dim=1
+            transition_matrices = torch.cat(
+                [batch_prev_state.unsqueeze(1), transition_matrices], dim=1
             )  # Shape: [K, Nb+1, M+1]
 
         # Compute prefix matrices P
         P = _torch_scan.prefix_scan(
-            M, prefix_func=_torch_scan.state_mult, dim=1
+            transition_matrices, prefix_func=_torch_scan.state_mult, dim=1
         )  # Shape: [K, Nb, M+1] or [K, Nb+1, M+1]
 
         # Obtain non-augmented states R for each of last N prefixes
@@ -503,12 +587,13 @@ class HawkesBase(torch.nn.Module, ABC):
             λ = torch.gather(λ, dim=1, index=mi[bs:be].unsqueeze(-1))  # Shape: [Nb, 1]
 
         # Return last intensity state for use in the next batch, if needed
+        res = (λ,)
         if batching:
-            return λ, P[:, -1, :]
-        elif return_states:
-            return λ, R
-        else:
-            return λ
+            res += (P[:, -1, :],)
+        if return_states:
+            res += (R,)
+
+        return res if len(res) > 1 else res[0]
 
     def intensity_at_t(self, t, ti, mi, R: torch.Tensor = None):
         """

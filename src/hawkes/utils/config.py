@@ -58,7 +58,7 @@ class Transformation:
 
 
 def _softplus_inv(y):
-    """Numerically stable softplus inverse that uses a linear approximation for large x"""
+    """Numerically stable softplus inverse that uses a linear approximation for large y"""
     return torch.where(y > 20, y, torch.log(torch.expm1(y)))
 
 

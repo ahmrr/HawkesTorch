@@ -37,7 +37,7 @@ parser.add_argument(
     help="Set number of event types (default: M = 10)",
 )
 parser.add_argument(
-    "--Nb",
+    "--batch-size",
     type=int,
     default=None,
     help="Set batch size (default: batching is disabled)",
