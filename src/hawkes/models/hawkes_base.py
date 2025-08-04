@@ -94,7 +94,6 @@ class HawkesBase(torch.nn.Module, ABC):
         self,
         M: int,
         K: int,
-        nll_function: HawkesNLL,
         transformation: config.Transformation,
         device="cpu",
         debug_config=config.HawkesDebugConfig(),
@@ -110,8 +109,7 @@ class HawkesBase(torch.nn.Module, ABC):
         super().__init__()
         self.M = M
         self.K = K
-        self._nll_function = nll_function
-        self._transformation = transformation
+        self.trans = transformation
 
         self.device = device
         self.debug_config = debug_config
@@ -271,7 +269,7 @@ class HawkesBase(torch.nn.Module, ABC):
             # Calculate NLL across entire data and perform the backward pass
             nll = self.nll(T, ti, mi)
             nll.backward()
-            # nll = self._compute_nll(
+            # nll = self._compute_nll_old(
             #     T, ti, mi, batch_size=fit_config.batch_size, compute_backward=True
             # )
             # assert torch.all(torch.isclose(nll, nll_old))
@@ -299,11 +297,11 @@ class HawkesBase(torch.nn.Module, ABC):
 
             # Check for NaN gradients
             for n, p in self.named_parameters():
-                # self.logger.error(f"Gradient of {n} is {p.grad}")
+                self.logger.error(f"Gradient of {n} is {p.grad}")
                 if torch.isnan(p.grad).any():
                     self.logger.error(f"Gradient of {n} is nan at epoch {epoch + 1}")
                     raise ValueError(f"Gradient of {n} is nan")
-            # exit(1)  # DEBUG: remove this
+            exit(1)  # DEBUG: remove this
 
             optimizer.step()
             losses.append(loss.item())
@@ -314,7 +312,7 @@ class HawkesBase(torch.nn.Module, ABC):
             # Progress logging at monitor intervals
             if (epoch + 1) % fit_config.monitor_interval == 0:
                 with torch.no_grad():
-                    full_nll = self._compute_nll(
+                    full_nll = self._compute_nll_old(
                         T, ti, mi, batch_size=fit_config.batch_size
                     )
                     sparsity_factor = (
@@ -362,28 +360,78 @@ class HawkesBase(torch.nn.Module, ABC):
 
         return losses
 
+    @abstractmethod
     def nll(
         self,
         T: float,
         ti: torch.Tensor,
         mi: torch.Tensor,
     ):
-        # TODO: batching
-        return self._nll_function.apply(
-            self.mu,
-            self.alpha,
-            self.gamma,
-            self._transformation,
-            self.intensity_at_events,
-            self.integrated_intensity,
-            self.M,
-            self.K,
-            T,
-            ti,
-            mi,
-        )
+        """Implement in subclass, likely using _compute_nll somewhere"""
+
+        pass
 
     def _compute_nll(
+        self,
+        T: float,
+        ti: torch.Tensor,
+        mi: torch.Tensor,
+        return_intensities=False,
+        batch_size=None,
+    ):
+        """
+        Computes the actual negative log-likelihood for a given event sequence. Should be called in a subclass implementation of `nll`.
+
+        Args:
+            T: End time of observation period
+            ti: Tensor of event times with shape (1, N, 1)
+            mi: Tensor of event types with shape (N,)
+            return_intensities: Whether to return the calculated event intensities, necessary for gradient computation
+            batch_size: Number of events to use in each batch; if None, batching is disabled
+
+        Returns:
+            NLL of the model's parameters given the data
+        """
+
+        N = ti.shape[1]
+        batch_size = batch_size or N
+
+        # Negative log-sum and integral terms in negative likelihood
+        nll_neg_logsum = 0.0
+        nll_int = 0.0
+
+        # Calculate intensity and integrated intensity in batches
+        prev_state = None
+
+        # TODO: Make batching work properly
+        if return_intensities:
+            intensity = torch.empty(N, device=ti.device)
+        for batch_start in range(0, N, batch_size):
+            Nb = min(batch_size, N - batch_start)
+
+            nll_int += self.integrated_intensity(
+                T, ti, mi, batching=True, batch_start=batch_start, batch_size=Nb
+            )
+
+            batch_intensity, prev_state = self.intensity_at_events(
+                ti,
+                mi,
+                full_intensity=False,
+                batching=True,
+                batch_start=batch_start,
+                batch_size=Nb,
+                batch_prev_state=prev_state,
+            )
+            nll_neg_logsum -= torch.sum(torch.log(batch_intensity))
+            if return_intensities:
+                intensity[batch_start : (batch_start + Nb)] = batch_intensity.squeeze()
+
+        if return_intensities:
+            return ((nll_neg_logsum + nll_int) / N, intensity)
+        else:
+            return (nll_neg_logsum + nll_int) / N
+
+    def _compute_nll_old(
         self,
         T: float,
         ti: torch.Tensor,
