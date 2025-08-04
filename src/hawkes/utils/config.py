@@ -51,19 +51,27 @@ class Transformation:
     Attributes:
         forward: The vectorized transformation function
         inverse: The vectorized inverse of the transformation
+        derivative: The vectorized derivative of the transformation
     """
 
     forward: Callable[[torch.Tensor], torch.Tensor]
     inverse: Callable[[torch.Tensor], torch.Tensor]
+    derivative: Callable[[torch.Tensor], torch.Tensor]
 
 
-def _softplus_inv(y):
-    """Numerically stable softplus inverse that uses a linear approximation for large y"""
-    return torch.where(y > 20, y, torch.log(torch.expm1(y)))
+def _softplus_inv(x):
+    """Numerically stable softplus inverse that uses a linear approximation for large x"""
+
+    return torch.where(x > 20, x, x + torch.log(-torch.expm1(-x)))
 
 
-EXP = Transformation(forward=torch.exp, inverse=torch.log)
+EXP = Transformation(
+    forward=torch.exp,
+    inverse=torch.log,
+    derivative=torch.exp,
+)
 SOFTPLUS = Transformation(
     forward=torch.nn.functional.softplus,
     inverse=_softplus_inv,
+    derivative=torch.sigmoid,
 )

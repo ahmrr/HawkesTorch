@@ -15,6 +15,7 @@ class HawkesNLL(torch.autograd.Function):
         mu: torch.Tensor,
         alpha: torch.Tensor,
         gamma: torch.Tensor,
+        transformation: config.Transformation,
         intensity_fun: typing.Callable,
         integrated_intensity_fun: typing.Callable,
         M: int,
@@ -72,8 +73,9 @@ class HawkesNLL(torch.autograd.Function):
             nll_neg_logsum -= torch.sum(torch.log(batch_intensity))
             intensity[batch_start : (batch_start + Nb)] = batch_intensity.squeeze()
 
+        ctx.trans = transformation
         ctx.M, ctx.K, ctx.T = M, K, T
-        ctx.save_for_backward(intensity, gamma, ti, mi)
+        ctx.save_for_backward(intensity, mu, alpha, gamma, ti, mi)
 
         return (nll_neg_logsum + nll_int) / N
 
@@ -93,6 +95,7 @@ class HawkesBase(torch.nn.Module, ABC):
         M: int,
         K: int,
         nll_function: HawkesNLL,
+        transformation: config.Transformation,
         device="cpu",
         debug_config=config.HawkesDebugConfig(),
     ):
@@ -108,6 +111,7 @@ class HawkesBase(torch.nn.Module, ABC):
         self.M = M
         self.K = K
         self._nll_function = nll_function
+        self._transformation = transformation
 
         self.device = device
         self.debug_config = debug_config
@@ -266,7 +270,8 @@ class HawkesBase(torch.nn.Module, ABC):
 
             # Calculate NLL across entire data and perform the backward pass
             nll = self.nll(T, ti, mi)
-            # nll_old = self._compute_nll(
+            nll.backward()
+            # nll = self._compute_nll(
             #     T, ti, mi, batch_size=fit_config.batch_size, compute_backward=True
             # )
             # assert torch.all(torch.isclose(nll, nll_old))
@@ -288,14 +293,17 @@ class HawkesBase(torch.nn.Module, ABC):
             else:
                 nuclear_norm = 0
 
+            (l1 + nuclear_norm).backward()
             loss = nll + l1 + nuclear_norm
-            loss.backward()
+            # loss.backward()
 
             # Check for NaN gradients
             for n, p in self.named_parameters():
+                # self.logger.error(f"Gradient of {n} is {p.grad}")
                 if torch.isnan(p.grad).any():
                     self.logger.error(f"Gradient of {n} is nan at epoch {epoch + 1}")
                     raise ValueError(f"Gradient of {n} is nan")
+            # exit(1)  # DEBUG: remove this
 
             optimizer.step()
             losses.append(loss.item())
@@ -365,6 +373,7 @@ class HawkesBase(torch.nn.Module, ABC):
             self.mu,
             self.alpha,
             self.gamma,
+            self._transformation,
             self.intensity_at_events,
             self.integrated_intensity,
             self.M,
