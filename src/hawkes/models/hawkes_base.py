@@ -1,4 +1,5 @@
 import math
+import time
 import torch
 import typing
 import logging
@@ -7,13 +8,15 @@ from abc import ABC, abstractmethod
 from ..utils import config, _torch_scan
 
 
-class HawkesNLL(torch.autograd.Function, ABC):
+class HawkesNLL(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx: typing.Any,
         mu: torch.Tensor,
         alpha: torch.Tensor,
         gamma: torch.Tensor,
+        intensity_fun: typing.Callable,
+        integrated_intensity_fun: typing.Callable,
         M: int,
         K: int,
         T: float,
@@ -49,15 +52,15 @@ class HawkesNLL(torch.autograd.Function, ABC):
         prev_state = None
 
         # TODO: Make batching work properly
-        intensity = torch.empty(N)
+        intensity = torch.empty(N, device=ti.device)
         for batch_start in range(0, N, batch_size):
             Nb = min(batch_size, N - batch_start)
 
-            nll_int += self.integrated_intensity(
+            nll_int += integrated_intensity_fun(
                 T, ti, mi, batching=True, batch_start=batch_start, batch_size=Nb
             )
 
-            batch_intensity, prev_state = self.intensity_at_events(
+            batch_intensity, prev_state = intensity_fun(
                 ti,
                 mi,
                 full_intensity=False,
@@ -69,16 +72,15 @@ class HawkesNLL(torch.autograd.Function, ABC):
             nll_neg_logsum -= torch.sum(torch.log(batch_intensity))
             intensity[batch_start : (batch_start + Nb)] = batch_intensity.squeeze()
 
-        ctx.save_for_backward(
-            intensity, torch.tensor(M), torch.tensor(K), torch.tensor(T), ti, mi
-        )
+        ctx.M, ctx.K, ctx.T = M, K, T
+        ctx.save_for_backward(intensity, gamma, ti, mi)
 
         return (nll_neg_logsum + nll_int) / N
 
     @staticmethod
-    @abstractmethod
     def backward(ctx, grad_output):
-        pass
+        """Workaround since this cannot be both an abstract base class and an autograd function"""
+        raise NotImplementedError("Subclasses must implement this method")
 
 
 class HawkesBase(torch.nn.Module, ABC):
@@ -87,7 +89,12 @@ class HawkesBase(torch.nn.Module, ABC):
     """
 
     def __init__(
-        self, M: int, K: int, device="cpu", debug_config=config.HawkesDebugConfig()
+        self,
+        M: int,
+        K: int,
+        nll_function: HawkesNLL,
+        device="cpu",
+        debug_config=config.HawkesDebugConfig(),
     ):
         """
         Args:
@@ -100,10 +107,10 @@ class HawkesBase(torch.nn.Module, ABC):
         super().__init__()
         self.M = M
         self.K = K
+        self._nll_function = nll_function
+
         self.device = device
-
         self.debug_config = debug_config
-
         self.logger = logging.getLogger(__name__)
 
         if debug_config.deterministic_sim:
@@ -258,9 +265,11 @@ class HawkesBase(torch.nn.Module, ABC):
             optimizer.zero_grad()
 
             # Calculate NLL across entire data and perform the backward pass
-            nll = self._compute_nll(
-                T, ti, mi, batch_size=fit_config.batch_size, compute_backward=True
-            )
+            nll = self.nll(T, ti, mi)
+            # nll_old = self._compute_nll(
+            #     T, ti, mi, batch_size=fit_config.batch_size, compute_backward=True
+            # )
+            # assert torch.all(torch.isclose(nll, nll_old))
 
             if fit_config.l1_penalty > 0:
                 l1_mu = torch.where(self.mu < fit_config.l1_hinge, self.mu, 0).sum()
@@ -279,8 +288,8 @@ class HawkesBase(torch.nn.Module, ABC):
             else:
                 nuclear_norm = 0
 
-            (l1 + nuclear_norm).backward()
             loss = nll + l1 + nuclear_norm
+            loss.backward()
 
             # Check for NaN gradients
             for n, p in self.named_parameters():
@@ -337,11 +346,33 @@ class HawkesBase(torch.nn.Module, ABC):
             f"Training summary: Final loss={losses[-1]:.4f}, "
             f"Loss reduction={loss_reduction:.1f}%, "
             f"Final sparsity={final_sparsity:.3f}"
-            f"Fitting took {fit_time_real}s, "
-            f"Peak memory usage was {peak_mem_gpu // 1e6}MiB"
+        )
+        self.logger.info(
+            f"Performance summary: Fitting took {time.strftime('%H:%M:%S', time.gmtime(fit_time_real))}, "
+            f"Peak GPU memory usage was {round(peak_mem_gpu / 2**20)}MiB"
         )
 
         return losses
+
+    def nll(
+        self,
+        T: float,
+        ti: torch.Tensor,
+        mi: torch.Tensor,
+    ):
+        # TODO: batching
+        return self._nll_function.apply(
+            self.mu,
+            self.alpha,
+            self.gamma,
+            self.intensity_at_events,
+            self.integrated_intensity,
+            self.M,
+            self.K,
+            T,
+            ti,
+            mi,
+        )
 
     def _compute_nll(
         self,
