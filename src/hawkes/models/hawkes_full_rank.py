@@ -7,59 +7,22 @@ from . import HawkesBase, HawkesNLL
 from ..utils import config, _torch_scan
 
 
-class HawkesFullRankNLL(torch.autograd.Function):
-    @staticmethod
-    def forward(
-        ctx: typing.Any,
-        inv_mu: torch.Tensor,
-        inv_alpha: torch.Tensor,
-        inv_gamma: torch.Tensor,
-        transformation: config.Transformation,
-        T: float,
-        ti: torch.Tensor,
-        mi: torch.Tensor,
-        compute_nll: typing.Callable,
-        M: int,
-    ):
-        """
-        Compute negative log-likelihood across the entire data, saving the appropriate tensors for gradient computation.
-
-        Args:
-            TODO: add args
-            ...
-            T: End time of observation period
-            ti: Tensor of event times with shape (1, N, 1)
-            mi: Tensor of event types with shape (N,)
-            ...
-
-        Returns:
-            NLL of the model's parameters given the data
-        """
-
-        (nll, intensity) = compute_nll(T, ti, mi, return_intensities=True)
-
-        ctx.trans = transformation
-        ctx.M, ctx.T = M, T
-        ctx.save_for_backward(intensity, inv_mu, inv_alpha, inv_gamma, ti, mi)
-
-        return nll
-
+class HawkesFullRankNLL(HawkesNLL):
     @staticmethod
     def backward(ctx: typing.Any, grad_output: torch.Tensor):
         # TODO: can use existing intensity exp_decay, maybe that would save some time or mem
         # TODO: replace this with argument to forward pass and accomodate parametrized gamma in gradient
         GAMMA_PARAM = False
 
-        M, T = ctx.M, ctx.T
-        intensity, inv_mu, inv_alpha, inv_gamma, ti, mi = ctx.saved_tensors
-        gamma = ctx.trans.forward(inv_gamma)
+        intensity, gamma, ti, mi = ctx.saved_tensors
+        M, K, T = ctx.M, ctx.K, ctx.T
 
         dti = ti - torch.cat([ti[:, 0:1, :], ti[:, 0:-1, :]], dim=1)  # Shape: [1, N, 1]
         exp_decay = torch.exp(-gamma * dti).permute(2, 1, 0)  # Shape: [K, N, 1]
         one_hot_vectors = torch.cat(
             [
                 torch.zeros(M, device=ti.device).unsqueeze(0),
-                F.one_hot(mi[:-1], num_classes=ctx.M),
+                F.one_hot(mi[:-1], num_classes=M),
             ],
             dim=0,
         )  # Shape: [N, M]
@@ -67,7 +30,7 @@ class HawkesFullRankNLL(torch.autograd.Function):
         # Compute K sequence (of shape [N, M, K]) where K[:, q, k] corresponds to alpha[p, q, k]
 
         transition_matrices = torch.cat(
-            [exp_decay, exp_decay * one_hot_vectors.unsqueeze(0)], dim=2
+            [exp_decay, exp_decay * one_hot_vectors], dim=2
         )  # Shape: [K, N, M+1]
 
         # Perform prefix scan on transition matrices
@@ -77,7 +40,7 @@ class HawkesFullRankNLL(torch.autograd.Function):
 
         # Obtain sorting indices of event nodes and the length of each node type in the sorted tensor
         mi_sorted, idx = torch.sort(mi, stable=True)
-        mi_counts = torch.bincount(mi_sorted, minlength=ctx.M).tolist()  # Ignore 0
+        mi_counts = torch.bincount(mi_sorted, minlength=M).tolist()  # Ignore 0
 
         # Sort ti, intensity, and states according to their node type (preserving temporal order as well)
         # Split based on which node they correspond to, with each split subsequence being sorted already
@@ -100,7 +63,7 @@ class HawkesFullRankNLL(torch.autograd.Function):
                 [λp.reciprocal().sum() for λp in intensity_split], device=ti.device
             )
             - T
-        )
+        )  # Shape: [M]
 
         # Compute alpha gradient components using intensity and prefix matrices
         intensity_state_sum = torch.stack(
@@ -115,14 +78,11 @@ class HawkesFullRankNLL(torch.autograd.Function):
             dim=1,
         )  # Shape: [1, M, K]
         alpha_grad = (intensity_state_sum - exp_decay_sum).permute(2, 0, 1)
-
-        # TODO: Handle parametrized gamma case
-        gamma_grad = None
+        gamma_grad = None  # * grad_output
 
         return (
-            None,
-            alpha_grad * ctx.trans.derivative(inv_alpha) * grad_output,
-            mu_grad * ctx.trans.derivative(inv_mu) * grad_output,
+            mu_grad * grad_output,
+            alpha_grad * grad_output,
             gamma_grad,
         ) + (None,) * 7
 
@@ -158,7 +118,7 @@ class HawkesFullRank(HawkesBase):
         super().__init__(
             M,
             K,
-            transformation=transformation,
+            nll_function=HawkesFullRankNLL,
             device=self.device,
             debug_config=debug_config,
         )
@@ -182,19 +142,6 @@ class HawkesFullRank(HawkesBase):
             (
                 self.trans.inverse(self.init_scale) * torch.ones(self.K, self.M, self.M)
             ).to(self.device)
-        )
-
-    def nll(self, T: float, ti: torch.Tensor, mi: torch.Tensor):
-        return HawkesFullRankNLL.apply(
-            self._inv_mu,
-            self._inv_alpha,
-            self._inv_gamma,
-            self.trans,
-            T,
-            ti,
-            mi,
-            self._compute_nll,
-            self.M,
         )
 
     @property
