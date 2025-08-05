@@ -14,7 +14,7 @@ class HawkesFullRankNLL(HawkesNLL):
         # TODO: replace this with argument to forward pass and accomodate parametrized gamma in gradient
         GAMMA_PARAM = False
 
-        intensity, mu, alpha, gamma, ti, mi = ctx.saved_tensors
+        intensity, gamma, ti, mi = ctx.saved_tensors
         M, K, T = ctx.M, ctx.K, ctx.T
 
         dti = ti - torch.cat([ti[:, 0:1, :], ti[:, 0:-1, :]], dim=1)  # Shape: [1, N, 1]
@@ -59,15 +59,11 @@ class HawkesFullRankNLL(HawkesNLL):
 
         # Compute mu gradient; only depends on each node type's intensity
         mu_grad = (
-            (
-                torch.tensor(
-                    [λp.reciprocal().sum() for λp in intensity_split], device=ti.device
-                )
-                - T
+            torch.tensor(
+                [λp.reciprocal().sum() for λp in intensity_split], device=ti.device
             )
-            * ctx.trans.derivative(ctx.trans.inverse(mu))
-            * grad_output
-        )
+            - T
+        )  # Shape: [M]
 
         # Compute alpha gradient components using intensity and prefix matrices
         intensity_state_sum = torch.stack(
@@ -81,15 +77,15 @@ class HawkesFullRankNLL(HawkesNLL):
             [-torch.expm1(-gamma * (T - tiq)).sum(dim=1) for tiq in ti_split],
             dim=1,
         )  # Shape: [1, M, K]
-
-        alpha_grad = (
-            (intensity_state_sum - exp_decay_sum).permute(2, 0, 1)
-            * ctx.trans.derivative(ctx.trans.inverse(alpha))
-            * grad_output
-        )
+        alpha_grad = (intensity_state_sum - exp_decay_sum).permute(2, 0, 1)
         gamma_grad = None  # * grad_output
 
-        return (None, alpha_grad, mu_grad, gamma_grad) + (None,) * 7
+        return (
+            None,
+            alpha_grad * grad_output,
+            mu_grad * grad_output,
+            gamma_grad,
+        ) + (None,) * 6
 
 
 class HawkesFullRank(HawkesBase):
@@ -124,7 +120,6 @@ class HawkesFullRank(HawkesBase):
             M,
             K,
             nll_function=HawkesFullRankNLL,
-            transformation=transformation,
             device=self.device,
             debug_config=debug_config,
         )
