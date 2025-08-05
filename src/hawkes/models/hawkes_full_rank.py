@@ -30,7 +30,7 @@ class HawkesFullRankNLL(HawkesNLL):
         # Compute K sequence (of shape [N, M, K]) where K[:, q, k] corresponds to alpha[p, q, k]
 
         transition_matrices = torch.cat(
-            [exp_decay, exp_decay * one_hot_vectors.unsqueeze(0)], dim=2
+            [exp_decay, exp_decay * one_hot_vectors], dim=2
         )  # Shape: [K, N, M+1]
 
         # Perform prefix scan on transition matrices
@@ -81,11 +81,10 @@ class HawkesFullRankNLL(HawkesNLL):
         gamma_grad = None  # * grad_output
 
         return (
-            None,
-            alpha_grad * grad_output,
             mu_grad * grad_output,
+            alpha_grad * grad_output,
             gamma_grad,
-        ) + (None,) * 6
+        ) + (None,) * 7
 
 
 class HawkesFullRank(HawkesBase):
