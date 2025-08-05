@@ -78,11 +78,12 @@ class HawkesFullRankNLL(HawkesNLL):
             dim=1,
         )  # Shape: [1, M, K]
         alpha_grad = (intensity_state_sum - exp_decay_sum).permute(2, 0, 1)
+
         gamma_grad = None  # * grad_output
 
         return (
-            mu_grad * grad_output,
-            alpha_grad * grad_output,
+            -mu_grad * grad_output,
+            -alpha_grad * grad_output,
             gamma_grad,
         ) + (None,) * 7
 
