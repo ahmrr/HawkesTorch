@@ -295,6 +295,7 @@ class HawkesBase(torch.nn.Module, ABC):
             for n, p in self.named_parameters():
                 if torch.isnan(p.grad).any():
                     self.logger.error(f"Gradient of {n} is nan at epoch {epoch + 1}")
+                    self.logger.info(p.grad)
                     raise ValueError(f"Gradient of {n} is nan")
 
             optimizer.step()
