@@ -112,7 +112,7 @@ match args.model_type:
         ).to(args.device)
 
 _ = model_est.fit(
-    1_000_000, ti, mi, fit_config
+    int(ti.max()), ti, mi, fit_config
 )  # Use a large number to capture all events
 
 # Save estimated model

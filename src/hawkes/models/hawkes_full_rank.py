@@ -120,11 +120,10 @@ class HawkesFullRankNLL(torch.autograd.Function):
         gamma_grad = None
 
         return (
-            None,
-            alpha_grad * ctx.trans.derivative(inv_alpha) * grad_output,
-            mu_grad * ctx.trans.derivative(inv_mu) * grad_output,
+            -mu_grad * ctx.trans.derivative(inv_mu) * grad_output,
+            -alpha_grad * ctx.trans.derivative(inv_alpha) * grad_output,
             gamma_grad,
-        ) + (None,) * 7
+        ) + (None,) * 8
 
 
 class HawkesFullRank(HawkesBase):
