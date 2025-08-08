@@ -4,6 +4,7 @@ import torch
 import typing
 import logging
 from abc import ABC, abstractmethod
+import torchviz
 
 from ..utils import config, _torch_scan
 
@@ -78,9 +79,132 @@ class HawkesNLL(torch.autograd.Function):
         return (nll_neg_logsum + nll_int) / N
 
     @staticmethod
-    def backward(ctx, grad_output):
-        """Workaround since this cannot be both an abstract base class and an autograd function"""
-        raise NotImplementedError("Subclasses must implement this method")
+    def backward(ctx: typing.Any, grad_output: torch.Tensor):
+        # TODO: can use existing intensity exp_decay, maybe that would save some time or mem
+
+        intensity, gamma, ti, mi = ctx.saved_tensors
+        M, K, T = ctx.M, ctx.K, ctx.T
+
+        dti = ti - torch.cat([ti[:, 0:1, :], ti[:, 0:-1, :]], dim=1)  # Shape: [1, N, 1]
+        exp_decay = torch.exp(-gamma * dti).permute(2, 1, 0)  # Shape: [K, N, 1]
+        one_hot_vectors = torch.cat(
+            [
+                torch.zeros(M, device=ti.device).unsqueeze(0),
+                torch.nn.functional.one_hot(mi[:-1], num_classes=M),
+            ],
+            dim=0,
+        )  # Shape: [N, M]
+
+        # Compute K sequence (of shape [N, M, K]) where K[:, q, k] corresponds to alpha[p, q, k]
+
+        transition_matrices = torch.cat(
+            [exp_decay, exp_decay * one_hot_vectors], dim=2
+        )  # Shape: [K, N, M+1]
+
+        # Perform prefix scan on transition matrices
+        prefix_matrices = _torch_scan.prefix_scan(
+            transition_matrices, prefix_func=_torch_scan.state_mult, dim=1
+        )  # Shape: [K, N, M+1]
+
+        # Extract states from prefix matrices
+        states = prefix_matrices[:, :, 1:].permute(1, 2, 0)  # Shape: [N, M, K]
+
+        # DEBUG: Check that prefix matrices are correct
+        # _state_0 = exp_decay[:, 0:1, :] * one_hot_vectors[0:1]  # Shape: [K, 1, M]
+        # _state_1 = (
+        #     exp_decay[:, 1:2, :] * _state_0
+        #     + exp_decay[:, 1:2, :] * one_hot_vectors[1:2]
+        # )
+        # _state_2 = (
+        #     exp_decay[:, 2:3, :] * _state_1
+        #     + exp_decay[:, 2:3, :] * one_hot_vectors[2:3]
+        # )
+        # assert torch.all(torch.isclose(states[0:1], _state_0.permute(1, 2, 0)))
+        # assert torch.all(torch.isclose(states[1:2], _state_1.permute(1, 2, 0)))
+        # assert torch.all(torch.isclose(states[2:3], _state_2.permute(1, 2, 0)))
+
+        # Obtain sorting indices of event nodes and the length of each node type in the sorted tensor
+        mi_sorted, idx = torch.sort(mi, stable=True)
+        mi_counts = torch.bincount(mi_sorted, minlength=M).tolist()
+
+        # Sort ti, intensity, and states according to their node type (preserving temporal order as well)
+        # Split based on which node they correspond to, with each split subsequence being sorted already
+        # The first tuple index is the node type; i.e., mi_split[p] contains events of node type p + 1
+        # The docs say that split returns a view of the original tensor, so this should be efficient
+        ti_split = torch.split(ti[:, idx, :], mi_counts, dim=1)  # Shape: [M, 1, Np, 1]
+        intensity_split = torch.split(
+            intensity[idx, None, None], mi_counts, dim=0
+        )  # Shape: [M, Np, 1, 1]
+        states_split = torch.split(
+            states[idx], mi_counts, dim=0
+        )  # Shape: [M, Np, M, K]
+
+        # DEBUG: Check that the split is doing what is intended
+        # _ti_split = tuple([] for _ in range(M))
+        # _intensity_split = tuple([] for _ in range(M))
+        # _states_split = tuple([] for _ in range(M))
+        # for t, m, i, s in zip(ti.squeeze(), mi, intensity, states):
+        #     _ti_split[m].append(t)
+        #     _intensity_split[m].append(i)
+        #     _states_split[m].append(s)
+
+        # for _split, split in [
+        #     (_states_split, states_split),
+        #     (_intensity_split, intensity_split),
+        #     (_ti_split, ti_split),
+        # ]:
+        #     for split_list, split_tensor in zip(_split, split):
+        #         print(torch.stack(split_list).squeeze().sum())
+        #         print(split_tensor.squeeze().sum())
+        #         exit(1)
+        #         assert torch.all(
+        #             torch.isclose(
+        #                 torch.stack(split_list).squeeze().sum(),
+        #                 split_tensor.squeeze().sum(),
+        #             )
+        #         )
+
+        # Compute mu gradient; only depends on each node type's intensity
+        mu_grad = (
+            torch.tensor(
+                [λp.reciprocal().sum() for λp in intensity_split], device=ti.device
+            )
+            - T
+        )  # Shape: [M]
+
+        # print(mu_grad)
+        # _mu_grad = [-T for _ in range(M)]
+        # for i, m in enumerate(mi):
+        #     _mu_grad[m] += 1 / intensity[i]
+        # print(torch.tensor(_mu_grad, device=ti.device))
+        # exit(1)
+
+        # Compute alpha gradient components using intensity and prefix matrices
+        intensity_state_sum = torch.stack(
+            [
+                (gamma * Kp / λp).sum(dim=0)
+                for (Kp, λp) in zip(states_split, intensity_split)
+            ],
+            dim=0,
+        )  # Shape: [M, M, K]
+        exp_decay_sum = torch.stack(
+            [-torch.expm1(-gamma * (T - tiq)).sum(dim=1) for tiq in ti_split],
+            dim=1,
+        )  # Shape: [1, M, K]
+        alpha_grad = (intensity_state_sum - exp_decay_sum).permute(2, 0, 1)
+
+        # TODO: Handle parametrized gamma case
+        gamma_grad = None  # * grad_output
+
+        # print(mu_grad, alpha_grad)
+        # exit(1)
+
+        # Return negative of log-likelihood gradient
+        return (
+            -mu_grad * grad_output,
+            -alpha_grad * grad_output,
+            gamma_grad,
+        ) + (None,) * 7
 
 
 class HawkesBase(torch.nn.Module, ABC):
@@ -92,7 +216,6 @@ class HawkesBase(torch.nn.Module, ABC):
         self,
         M: int,
         K: int,
-        nll_function: HawkesNLL,
         device="cpu",
         debug_config=config.HawkesDebugConfig(),
     ):
@@ -107,7 +230,6 @@ class HawkesBase(torch.nn.Module, ABC):
         super().__init__()
         self.M = M
         self.K = K
-        self._nll_function = nll_function
 
         self.device = device
         self.debug_config = debug_config
@@ -266,10 +388,70 @@ class HawkesBase(torch.nn.Module, ABC):
 
             # Calculate NLL across entire data and perform the backward pass
             nll = self.nll(T, ti, mi)
-            # nll_old = self._compute_nll(
+            torchviz.make_dot(
+                nll,
+                params=dict(list(self.named_parameters())),
+                show_attrs=True,
+                show_saved=True,
+            ).render("autograd", format="png")
+            nll.backward()
+            # nll = self._compute_nll(
             #     T, ti, mi, batch_size=fit_config.batch_size, compute_backward=True
             # )
+
+            # N = ti.shape[1]
+            # batch_size = fit_config.batch_size or N
+            # nll_neg_logsum = 0.0
+            # nll_int = 0.0
+            # prev_state = None
+            # for batch_start in range(0, N, batch_size):
+            #     Nb = min(batch_size, N - batch_start)
+
+            #     nll_int += self.integrated_intensity(
+            #         T, ti, mi, batching=True, batch_start=batch_start, batch_size=Nb
+            #     )
+
+            #     batch_intensity, prev_state = self.intensity_at_events(
+            #         ti,
+            #         mi,
+            #         full_intensity=False,
+            #         batching=True,
+            #         batch_start=batch_start,
+            #         batch_size=Nb,
+            #         batch_prev_state=prev_state,
+            #     )
+            #     nll_neg_logsum -= torch.sum(torch.log(batch_intensity))
+
+            # nll = (nll_neg_logsum + nll_int) / N
+            # torchviz.make_dot(
+            #     nll,
+            #     params=dict(list(self.named_parameters())),
+            #     show_attrs=True,
+            #     show_saved=True,
+            # ).render("autograd", format="png")
+            # nll.backward()
+
             # assert torch.all(torch.isclose(nll, nll_old))
+
+            # Compute gradient manually rq
+            # M = self.M
+            # intensity = self.intensity_at_events(ti, mi, full_intensity=False).squeeze()
+            # _intensity_split = [[] for _ in range(M)]
+            # for t, m, i in zip(ti.squeeze(), mi, intensity):
+            #     _intensity_split[m].append(i.item())
+            # for i in range(M):
+            #     _intensity_split[i] = torch.tensor(
+            #         _intensity_split[i], device=ti.device
+            #     )
+            # mu_grad = -(
+            #     torch.tensor(
+            #         [torch.reciprocal(ip).sum() for ip in _intensity_split],
+            #         device=ti.device,
+            #     )
+            #     - T
+            # )
+            # mu_grad *= torch.sigmoid(self._inv_mu)
+            # print(mu_grad)
 
             if fit_config.l1_penalty > 0:
                 l1_mu = torch.where(self.mu < fit_config.l1_hinge, self.mu, 0).sum()
@@ -288,15 +470,17 @@ class HawkesBase(torch.nn.Module, ABC):
             else:
                 nuclear_norm = 0
 
+            (l1 + nuclear_norm).backward()
             loss = nll + l1 + nuclear_norm
-            loss.backward()
 
             # Check for NaN gradients
             for n, p in self.named_parameters():
+                print(f"{n} grad: {p.grad}")
                 if torch.isnan(p.grad).any():
                     self.logger.error(f"Gradient of {n} is nan at epoch {epoch + 1}")
                     self.logger.info(p.grad)
                     raise ValueError(f"Gradient of {n} is nan")
+            exit(1)
 
             optimizer.step()
             losses.append(loss.item())
@@ -361,8 +545,8 @@ class HawkesBase(torch.nn.Module, ABC):
         ti: torch.Tensor,
         mi: torch.Tensor,
     ):
-        # TODO: batching
-        return self._nll_function.apply(
+        # TODO: Incorporate and support batching
+        return HawkesNLL.apply(
             self.mu,
             self.alpha,
             self.gamma,
