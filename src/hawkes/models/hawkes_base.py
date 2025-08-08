@@ -8,6 +8,31 @@ import torchviz
 
 from ..utils import config, _torch_scan
 
+torch.set_printoptions(threshold=10_000, linewidth=160)
+
+# fmt: off
+CORRECT_GRAD = torch.tensor([[[-0.0183, -0.0209, -0.0041, -0.0019, -0.0034, -0.0022, -0.0022,
+          -0.0019, -0.0027, -0.0096],
+         [-0.0135, -0.0241, -0.0036, -0.0033, -0.0028, -0.0013, -0.0021,
+          -0.0032, -0.0012, -0.0128],
+         [-0.0026, -0.0028, -0.0193, -0.0232, -0.0252, -0.0016, -0.0027,
+          -0.0024, -0.0033, -0.0086],
+         [-0.0023, -0.0013, -0.0151, -0.0299, -0.0196, -0.0005, -0.0032,
+          -0.0017, -0.0030, -0.0091],
+         [-0.0019, -0.0023, -0.0158, -0.0221, -0.0246, -0.0022, -0.0029,
+          -0.0020, -0.0021, -0.0118],
+         [-0.0019, -0.0019, -0.0027, -0.0007, -0.0017, -0.0103, -0.0075,
+          -0.0092, -0.0094, -0.0037],
+         [-0.0027, -0.0032, -0.0035, -0.0031, -0.0024, -0.0044, -0.0047,
+          -0.0054, -0.0063, -0.0057],
+         [-0.0025, -0.0020, -0.0026, -0.0019, -0.0020, -0.0044, -0.0053,
+          -0.0056, -0.0067, -0.0048],
+         [-0.0035, -0.0027, -0.0032, -0.0034, -0.0035, -0.0037, -0.0042,
+          -0.0063, -0.0057, -0.0073],
+         [-0.0080, -0.0086, -0.0074, -0.0081, -0.0073, -0.0032, -0.0035,
+          -0.0038, -0.0057, -0.0353]]], device='cuda:0')
+# fmt: on
+
 
 class HawkesNLL(torch.autograd.Function):
     @staticmethod
@@ -199,7 +224,26 @@ class HawkesNLL(torch.autograd.Function):
             [-torch.expm1(-gamma * (T - tiq)).sum(dim=1) for tiq in ti_split],
             dim=1,
         )  # Shape: [M, K]
-        alpha_grad = (intensity_state_sum - exp_decay_sum).permute(2, 0, 1)
+
+        # DEBUG: Check correctness of alpha terms
+        # sums = [0] * M
+        # for m, t in zip(mi, ti.squeeze()):
+        #     sums[m] += 1 - torch.exp(-gamma * (T - t)).item()
+        # print(exp_decay_sum)
+        # print(sums)
+        # _states = [0.0] * M
+        # ti = ti.squeeze()
+        # for lim in [100]:  # range(mi.shape[0])
+        #     for m, t in zip(mi[:lim], ti[:lim]):
+        #         _states[m] += torch.exp(-gamma * (ti[lim] - t)).item()
+        #     _states_ten = torch.tensor(_states, device=ti.device).unsqueeze(-1)
+        #     print(torch.isclose(_states_ten, states[lim]))
+        #     print(_states_ten, states[lim])
+        #     assert torch.all(torch.isclose(_states_ten, states[lim]))
+        # print(states[lim])
+        # print(_states)
+
+        alpha_grad = (intensity_state_sum - exp_decay_sum).permute(2, 1, 0)
 
         # TODO: Handle parametrized gamma case
         gamma_grad = None  # * grad_output
@@ -402,7 +446,7 @@ class HawkesBase(torch.nn.Module, ABC):
             #     show_attrs=True,
             #     show_saved=True,
             # ).render("autograd", format="png")
-            # nll.backward()
+            nll.backward()
             # nll = self._compute_nll(
             #     T, ti, mi, batch_size=fit_config.batch_size, compute_backward=True
             # )
@@ -483,12 +527,15 @@ class HawkesBase(torch.nn.Module, ABC):
 
             # Check for NaN gradients
             for n, p in self.named_parameters():
-                print(f"{n} grad: {p.grad}")
+                # print(f"{n} grad: {p.grad}")
                 if torch.isnan(p.grad).any():
                     self.logger.error(f"Gradient of {n} is nan at epoch {epoch + 1}")
                     self.logger.info(p.grad)
                     raise ValueError(f"Gradient of {n} is nan")
-            exit(1)
+            # DEBUG: compare
+            # sigmoid = torch.sigmoid(self._inv_alpha)
+            # print((self._inv_alpha.grad / sigmoid - CORRECT_GRAD / sigmoid).abs())
+            # exit(1)
 
             optimizer.step()
             losses.append(loss.item())
