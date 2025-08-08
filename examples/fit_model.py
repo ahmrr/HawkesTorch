@@ -94,7 +94,6 @@ match args.model_type:
             gamma=torch.tensor(est_gamma).to(args.device),
             init_scale=est_init_scale,
             gamma_param=False,  # TODO: Disable this
-            transformation=config.IDENTITY,
         ).to(args.device)
     case "low-rank":
         model_est = models.HawkesLowRank(
