@@ -70,14 +70,34 @@ args = parser.parse_args()
 # Simulate Hawkes process data
 
 # Fixed simulation hyperparameters to imitate "hub-and-spoke" interaction behavior
-S = 0.1  # Spontaneous rate
-I = 0.9  # Influence rate
+# S = 0.1  # Spontaneous rate
+# I = 0.9  # Influence rate
+# sim_K = 1
+# sim_gamma = [1.5] * sim_K
+# sim_init_scale = 0.1
+# sim_mu = [S] + [0] * (args.M - 1)  # Only hub has spontaneous activity
+# sim_alpha = [[0] * args.M for _ in range(args.M)]
+# sim_alpha[0] = [I] * args.M  # Hub influences all nodes including self
+
+S = 0.1
+I = 0.5
+M = 10
 sim_K = 1
 sim_gamma = [1.5] * sim_K
 sim_init_scale = 0.1
-sim_mu = [S] + [0] * (args.M - 1)  # Only hub has spontaneous activity
-sim_alpha = [[0] * args.M for _ in range(args.M)]
-sim_alpha[0] = [I] * args.M  # Hub influences all nodes including self
+sim_mu = [S, 0, S, 0, 0, S, S, S, S, S]
+sim_alpha = [
+    [I, I, 0, 0, 0, 0, 0, 0, 0, 0],
+    [S, I, 0, 0, 0, 0, 0, 0, 0, S],
+    [0, 0, I, I, I, 0, 0, 0, 0, 0],
+    [0, 0, S, I, S, 0, 0, 0, 0, 0],
+    [0, 0, S, S, I, 0, 0, 0, 0, S],
+    [0, 0, 0, 0, 0, I, I, I, I, 0],
+    [0, 0, 0, 0, 0, 0, S, S, S, 0],
+    [0, 0, 0, 0, 0, 0, 0, S, S, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, S, S],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, I],
+]
 
 # Initialize model used for simulation
 model_sim = models.HawkesFullRank(

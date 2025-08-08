@@ -75,6 +75,7 @@ ti, mi = torch.load(args.events_file, weights_only=True)
 # Fitting hyperparameters
 fit_config = config.HawkesFitConfig(
     num_steps=4000,
+    batch_size=args.batch_size,
     monitor_interval=400,
     learning_rate=0.1,
     l1_penalty=0.01,
@@ -93,6 +94,7 @@ match args.model_type:
             gamma=torch.tensor(est_gamma).to(args.device),
             init_scale=est_init_scale,
             gamma_param=False,  # TODO: Disable this
+            transformation=config.IDENTITY,
         ).to(args.device)
     case "low-rank":
         model_est = models.HawkesLowRank(
