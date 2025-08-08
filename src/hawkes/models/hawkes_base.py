@@ -84,6 +84,7 @@ class HawkesNLL(torch.autograd.Function):
 
         intensity, gamma, ti, mi = ctx.saved_tensors
         M, K, T = ctx.M, ctx.K, ctx.T
+        N = ti.shape[1]
 
         dti = ti - torch.cat([ti[:, 0:1, :], ti[:, 0:-1, :]], dim=1)  # Shape: [1, N, 1]
         exp_decay = torch.exp(-gamma * dti).permute(2, 1, 0)  # Shape: [K, N, 1]
@@ -165,18 +166,25 @@ class HawkesNLL(torch.autograd.Function):
         #         )
 
         # Compute mu gradient; only depends on each node type's intensity
-        mu_grad = (
-            torch.tensor(
-                [λp.reciprocal().sum() for λp in intensity_split], device=ti.device
-            )
-            - T
+        mu_grad = torch.tensor(
+            [λp.reciprocal().sum() - T for λp in intensity_split], device=ti.device
         )  # Shape: [M]
 
+        # DEBUG: debugging mu_grad
         # print(mu_grad)
         # _mu_grad = [-T for _ in range(M)]
         # for i, m in enumerate(mi):
         #     _mu_grad[m] += 1 / intensity[i]
         # print(torch.tensor(_mu_grad, device=ti.device))
+        # exit(1)
+        # cts = [0] * M
+        # for p in range(M):
+        #     for m in mi:
+        #         if m == p:
+        #             cts[p] += 1
+        # for s, i in zip(states_split, intensity_split):
+        #     print(s.shape, i.shape)
+        # print(cts)
         # exit(1)
 
         # Compute alpha gradient components using intensity and prefix matrices
@@ -190,7 +198,7 @@ class HawkesNLL(torch.autograd.Function):
         exp_decay_sum = torch.stack(
             [-torch.expm1(-gamma * (T - tiq)).sum(dim=1) for tiq in ti_split],
             dim=1,
-        )  # Shape: [1, M, K]
+        )  # Shape: [M, K]
         alpha_grad = (intensity_state_sum - exp_decay_sum).permute(2, 0, 1)
 
         # TODO: Handle parametrized gamma case
@@ -199,10 +207,10 @@ class HawkesNLL(torch.autograd.Function):
         # print(mu_grad, alpha_grad)
         # exit(1)
 
-        # Return negative of log-likelihood gradient
+        # Return negative of log-likelihood gradient scaled by 1/N
         return (
-            -mu_grad * grad_output,
-            -alpha_grad * grad_output,
+            -mu_grad * grad_output / N,
+            -alpha_grad * grad_output / N,
             gamma_grad,
         ) + (None,) * 7
 
@@ -388,13 +396,13 @@ class HawkesBase(torch.nn.Module, ABC):
 
             # Calculate NLL across entire data and perform the backward pass
             nll = self.nll(T, ti, mi)
-            torchviz.make_dot(
-                nll,
-                params=dict(list(self.named_parameters())),
-                show_attrs=True,
-                show_saved=True,
-            ).render("autograd", format="png")
-            nll.backward()
+            # torchviz.make_dot(
+            #     nll,
+            #     params=dict(list(self.named_parameters())),
+            #     show_attrs=True,
+            #     show_saved=True,
+            # ).render("autograd", format="png")
+            # nll.backward()
             # nll = self._compute_nll(
             #     T, ti, mi, batch_size=fit_config.batch_size, compute_backward=True
             # )
@@ -657,6 +665,7 @@ class HawkesBase(torch.nn.Module, ABC):
         ti = ti[mask].reshape(1, -1, 1)
         mi = mi[mask.squeeze(0, 2)]
 
+        # alphas = self.alpha[:, :, mi].permute(2, 1, 0)[None]
         alphas = self.alpha[:, mi].permute(1, 2, 0)[None]
         ti = ti[..., None]
 
@@ -813,16 +822,22 @@ class HawkesBase(torch.nn.Module, ABC):
 
     def intensity_at_t(self, t, ti, mi, R: torch.Tensor = None):
         """
-        Computes the intensity at (and including) times that are not necessarily events. This is useful for plotting the intensity function of an event sequence.
+                Computes the intensity at (and including) times that are not necessarily events. This is useful for plotting the intensity function of an event sequence.
 
-        Args:
-            t: Tensor of times to compute right-limit intensities at.
-            ti: Tensor of event times.
-            mi: Tensor of event types.
-            R: Tensor of intensity states saved during intensity calculation at each ti and mi. If None, this is computed internally.
+                Args:
+                    t: Tensor of times tI forgot to say that this explanation does make sense in terms of the likelihood itself:
+        image.png
 
-        Returns:
-            Intensities across all nodes at each time t, of shape (t.shape[0], M).
+        But not directly in terms of the log likelihood, I suppose.
+
+        Best,
+        Ahmero compute right-limit intensities at.
+                    ti: Tensor of event times.
+                    mi: Tensor of event types.
+                    R: Tensor of intensity states saved during intensity calculation at each ti and mi. If None, this is computed internally.
+
+                Returns:
+                    Intensities across all nodes at each time t, of shape (t.shape[0], M).
         """
 
         if R is None:
