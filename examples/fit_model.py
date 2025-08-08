@@ -82,7 +82,7 @@ fit_config = config.HawkesFitConfig(
     l1_hinge=0.05,
     nuc_penalty=0,
 )
-est_gamma = np.linspace(0.1, 5, 5).tolist()
+est_gamma = [1.5]  # np.linspace(0.1, 5, 5).tolist()
 est_init_scale = 0.01
 est_rank = 3
 
@@ -113,7 +113,7 @@ match args.model_type:
         ).to(args.device)
 
 _ = model_est.fit(
-    float(ti.max()), ti, mi, fit_config
+    1_000_000, ti, mi, fit_config
 )  # Use a large number to capture all events
 
 # Save estimated model

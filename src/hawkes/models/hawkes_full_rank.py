@@ -6,8 +6,6 @@ import torch.nn.functional as F
 from . import HawkesBase
 from ..utils import config, _torch_scan
 
-torch.set_printoptions(threshold=10_000)
-
 
 class HawkesFullRank(HawkesBase):
     """Standard full-rank Hawkes process implementation."""
