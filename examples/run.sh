@@ -4,13 +4,17 @@ export PYTHONPATH=../src
 
 RUN_SIM=true
 RUN_PLOT=true
+SAVE_LOG=true
 for arg in "$@"; do
-    if [ "$arg" = "--no-sim" ]; then
-        RUN_SIM=false
-    elif [ "$arg" = "--no-plot" ]; then
-        RUN_PLOT=false
-    fi
+    case "$arg" in
+        --no-sim)   RUN_SIM=false ;;
+        --no-plot)  RUN_PLOT=false ;;
+        --no-log)   SAVE_LOG=false ;;
+        *) echo "Unknown option: $arg" >&2; exit 1 ;;
+    esac
 done
+
+exec > >(tee run.log) 2>&1
 
 if [ "$RUN_SIM" = true ]; then
     python simulate_data.py --deterministic-sim

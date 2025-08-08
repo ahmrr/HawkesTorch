@@ -8,33 +8,12 @@ import torchviz
 
 from ..utils import config, _torch_scan
 
-torch.set_printoptions(threshold=10_000, linewidth=160)
-
-# fmt: off
-CORRECT_GRAD = torch.tensor([[[-0.0183, -0.0209, -0.0041, -0.0019, -0.0034, -0.0022, -0.0022,
-          -0.0019, -0.0027, -0.0096],
-         [-0.0135, -0.0241, -0.0036, -0.0033, -0.0028, -0.0013, -0.0021,
-          -0.0032, -0.0012, -0.0128],
-         [-0.0026, -0.0028, -0.0193, -0.0232, -0.0252, -0.0016, -0.0027,
-          -0.0024, -0.0033, -0.0086],
-         [-0.0023, -0.0013, -0.0151, -0.0299, -0.0196, -0.0005, -0.0032,
-          -0.0017, -0.0030, -0.0091],
-         [-0.0019, -0.0023, -0.0158, -0.0221, -0.0246, -0.0022, -0.0029,
-          -0.0020, -0.0021, -0.0118],
-         [-0.0019, -0.0019, -0.0027, -0.0007, -0.0017, -0.0103, -0.0075,
-          -0.0092, -0.0094, -0.0037],
-         [-0.0027, -0.0032, -0.0035, -0.0031, -0.0024, -0.0044, -0.0047,
-          -0.0054, -0.0063, -0.0057],
-         [-0.0025, -0.0020, -0.0026, -0.0019, -0.0020, -0.0044, -0.0053,
-          -0.0056, -0.0067, -0.0048],
-         [-0.0035, -0.0027, -0.0032, -0.0034, -0.0035, -0.0037, -0.0042,
-          -0.0063, -0.0057, -0.0073],
-         [-0.0080, -0.0086, -0.0074, -0.0081, -0.0073, -0.0032, -0.0035,
-          -0.0038, -0.0057, -0.0353]]], device='cuda:0')
-# fmt: on
-
 
 class HawkesNLL(torch.autograd.Function):
+    """
+    Custom autograd Function to compute the NLL of a multivariate Hawkes process, as well as its parameter gradients.
+    """
+
     @staticmethod
     def forward(
         ctx: typing.Any,
@@ -52,21 +31,6 @@ class HawkesNLL(torch.autograd.Function):
         batch_start=0,
         batch_size=None,
     ):
-        """
-        Compute negative log-likelihood across the entire data using batching.
-
-        Args:
-            TODO: add args
-            T: End time of observation period
-            ti: Tensor of event times with shape (1, N, 1)
-            mi: Tensor of event types with shape (N,)
-            batch_size: NumIt must accept a context ctx as the first argument, followed by any number of arguments (tensors or other types).ber of events to use in each batch. If None, use all events
-            perform_backward: Perform backward pass, computing gradients in a batched manner
-
-        Returns:
-            NLL of the model's parameters given the data
-        """
-
         N = ti.shape[1]
         batch_size = batch_size or N
 
@@ -184,7 +148,7 @@ class HawkesNLL(torch.autograd.Function):
 
 class HawkesBase(torch.nn.Module, ABC):
     """
-    Abstract base class for Hawkes process implementations.
+    Abstract base class for multivariate Hawkes process implementations.
     """
 
     def __init__(
@@ -727,22 +691,16 @@ class HawkesBase(torch.nn.Module, ABC):
 
     def intensity_at_t(self, t, ti, mi, R: torch.Tensor = None):
         """
-                Computes the intensity at (and including) times that are not necessarily events. This is useful for plotting the intensity function of an event sequence.
+        Computes the intensity at (and including) times that are not necessarily events. This is useful for plotting the intensity function of an event sequence.
 
-                Args:
-                    t: Tensor of times tI forgot to say that this explanation does make sense in terms of the likelihood itself:
-        image.png
+        Args:
+            t: Tensor of times to compute right-limit intensities at.
+            ti: Tensor of event times.
+            mi: Tensor of event types.
+            R: Tensor of intensity states saved during intensity calculation at each ti and mi. If None, this is computed internally.
 
-        But not directly in terms of the log likelihood, I suppose.
-
-        Best,
-        Ahmero compute right-limit intensities at.
-                    ti: Tensor of event times.
-                    mi: Tensor of event types.
-                    R: Tensor of intensity states saved during intensity calculation at each ti and mi. If None, this is computed internally.
-
-                Returns:
-                    Intensities across all nodes at each time t, of shape (t.shape[0], M).
+        Returns:
+            Intensities across all nodes at each time t, of shape (t.shape[0], M).
         """
 
         if R is None:
@@ -778,7 +736,7 @@ class HawkesBase(torch.nn.Module, ABC):
             dim=0,
         )  # Shape: [t.shape, M]
 
-    def intensity_reference_implementation(
+    def _intensity_reference_implementation(
         self,
         t: torch.Tensor | float,
         m: torch.Tensor | int | None,

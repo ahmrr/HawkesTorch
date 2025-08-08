@@ -82,7 +82,7 @@ fit_config = config.HawkesFitConfig(
     l1_hinge=0.05,
     nuc_penalty=0,
 )
-est_gamma = [1.5]  # np.linspace(0.1, 5, 5).tolist()
+est_gamma = np.linspace(0.1, 5, 5).tolist()
 est_init_scale = 0.01
 est_rank = 3
 
