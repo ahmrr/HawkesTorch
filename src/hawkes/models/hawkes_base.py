@@ -135,20 +135,6 @@ class HawkesNLL(torch.autograd.Function):
         # Extract states from prefix matrices
         states = prefix_matrices[:, :, 1:].permute(1, 2, 0)  # Shape: [N, M, K]
 
-        # DEBUG: Check that prefix matrices are correct
-        # _state_0 = exp_decay[:, 0:1, :] * one_hot_vectors[0:1]  # Shape: [K, 1, M]
-        # _state_1 = (
-        #     exp_decay[:, 1:2, :] * _state_0
-        #     + exp_decay[:, 1:2, :] * one_hot_vectors[1:2]
-        # )
-        # _state_2 = (
-        #     exp_decay[:, 2:3, :] * _state_1
-        #     + exp_decay[:, 2:3, :] * one_hot_vectors[2:3]
-        # )
-        # assert torch.all(torch.isclose(states[0:1], _state_0.permute(1, 2, 0)))
-        # assert torch.all(torch.isclose(states[1:2], _state_1.permute(1, 2, 0)))
-        # assert torch.all(torch.isclose(states[2:3], _state_2.permute(1, 2, 0)))
-
         # Obtain sorting indices of event nodes and the length of each node type in the sorted tensor
         mi_sorted, idx = torch.sort(mi, stable=True)
         mi_counts = torch.bincount(mi_sorted, minlength=M).tolist()
@@ -165,52 +151,10 @@ class HawkesNLL(torch.autograd.Function):
             states[idx], mi_counts, dim=0
         )  # Shape: [M, Np, M, K]
 
-        # DEBUG: Check that the split is doing what is intended
-        # _ti_split = tuple([] for _ in range(M))
-        # _intensity_split = tuple([] for _ in range(M))
-        # _states_split = tuple([] for _ in range(M))
-        # for t, m, i, s in zip(ti.squeeze(), mi, intensity, states):
-        #     _ti_split[m].append(t)
-        #     _intensity_split[m].append(i)
-        #     _states_split[m].append(s)
-
-        # for _split, split in [
-        #     (_states_split, states_split),
-        #     (_intensity_split, intensity_split),
-        #     (_ti_split, ti_split),
-        # ]:
-        #     for split_list, split_tensor in zip(_split, split):
-        #         print(torch.stack(split_list).squeeze().sum())
-        #         print(split_tensor.squeeze().sum())
-        #         exit(1)
-        #         assert torch.all(
-        #             torch.isclose(
-        #                 torch.stack(split_list).squeeze().sum(),
-        #                 split_tensor.squeeze().sum(),
-        #             )
-        #         )
-
         # Compute mu gradient; only depends on each node type's intensity
         mu_grad = torch.tensor(
             [λp.reciprocal().sum() - T for λp in intensity_split], device=ti.device
         )  # Shape: [M]
-
-        # DEBUG: debugging mu_grad
-        # print(mu_grad)
-        # _mu_grad = [-T for _ in range(M)]
-        # for i, m in enumerate(mi):
-        #     _mu_grad[m] += 1 / intensity[i]
-        # print(torch.tensor(_mu_grad, device=ti.device))
-        # exit(1)
-        # cts = [0] * M
-        # for p in range(M):
-        #     for m in mi:
-        #         if m == p:
-        #             cts[p] += 1
-        # for s, i in zip(states_split, intensity_split):
-        #     print(s.shape, i.shape)
-        # print(cts)
-        # exit(1)
 
         # Compute alpha gradient components using intensity and prefix matrices
         intensity_state_sum = torch.stack(
@@ -225,31 +169,10 @@ class HawkesNLL(torch.autograd.Function):
             dim=1,
         )  # Shape: [M, K]
 
-        # DEBUG: Check correctness of alpha terms
-        # sums = [0] * M
-        # for m, t in zip(mi, ti.squeeze()):
-        #     sums[m] += 1 - torch.exp(-gamma * (T - t)).item()
-        # print(exp_decay_sum)
-        # print(sums)
-        # _states = [0.0] * M
-        # ti = ti.squeeze()
-        # for lim in [100]:  # range(mi.shape[0])
-        #     for m, t in zip(mi[:lim], ti[:lim]):
-        #         _states[m] += torch.exp(-gamma * (ti[lim] - t)).item()
-        #     _states_ten = torch.tensor(_states, device=ti.device).unsqueeze(-1)
-        #     print(torch.isclose(_states_ten, states[lim]))
-        #     print(_states_ten, states[lim])
-        #     assert torch.all(torch.isclose(_states_ten, states[lim]))
-        # print(states[lim])
-        # print(_states)
-
         alpha_grad = (intensity_state_sum - exp_decay_sum).permute(2, 1, 0)
 
         # TODO: Handle parametrized gamma case
-        gamma_grad = None  # * grad_output
-
-        # print(mu_grad, alpha_grad)
-        # exit(1)
+        gamma_grad = None
 
         # Return negative of log-likelihood gradient scaled by 1/N
         return (
@@ -440,70 +363,10 @@ class HawkesBase(torch.nn.Module, ABC):
 
             # Calculate NLL across entire data and perform the backward pass
             nll = self.nll(T, ti, mi)
-            # torchviz.make_dot(
-            #     nll,
-            #     params=dict(list(self.named_parameters())),
-            #     show_attrs=True,
-            #     show_saved=True,
-            # ).render("autograd", format="png")
             nll.backward()
             # nll = self._compute_nll(
             #     T, ti, mi, batch_size=fit_config.batch_size, compute_backward=True
             # )
-
-            # N = ti.shape[1]
-            # batch_size = fit_config.batch_size or N
-            # nll_neg_logsum = 0.0
-            # nll_int = 0.0
-            # prev_state = None
-            # for batch_start in range(0, N, batch_size):
-            #     Nb = min(batch_size, N - batch_start)
-
-            #     nll_int += self.integrated_intensity(
-            #         T, ti, mi, batching=True, batch_start=batch_start, batch_size=Nb
-            #     )
-
-            #     batch_intensity, prev_state = self.intensity_at_events(
-            #         ti,
-            #         mi,
-            #         full_intensity=False,
-            #         batching=True,
-            #         batch_start=batch_start,
-            #         batch_size=Nb,
-            #         batch_prev_state=prev_state,
-            #     )
-            #     nll_neg_logsum -= torch.sum(torch.log(batch_intensity))
-
-            # nll = (nll_neg_logsum + nll_int) / N
-            # torchviz.make_dot(
-            #     nll,
-            #     params=dict(list(self.named_parameters())),
-            #     show_attrs=True,
-            #     show_saved=True,
-            # ).render("autograd", format="png")
-            # nll.backward()
-
-            # assert torch.all(torch.isclose(nll, nll_old))
-
-            # Compute gradient manually rq
-            # M = self.M
-            # intensity = self.intensity_at_events(ti, mi, full_intensity=False).squeeze()
-            # _intensity_split = [[] for _ in range(M)]
-            # for t, m, i in zip(ti.squeeze(), mi, intensity):
-            #     _intensity_split[m].append(i.item())
-            # for i in range(M):
-            #     _intensity_split[i] = torch.tensor(
-            #         _intensity_split[i], device=ti.device
-            #     )
-            # mu_grad = -(
-            #     torch.tensor(
-            #         [torch.reciprocal(ip).sum() for ip in _intensity_split],
-            #         device=ti.device,
-            #     )
-            #     - T
-            # )
-            # mu_grad *= torch.sigmoid(self._inv_mu)
-            # print(mu_grad)
 
             if fit_config.l1_penalty > 0:
                 l1_mu = torch.where(self.mu < fit_config.l1_hinge, self.mu, 0).sum()
@@ -527,15 +390,10 @@ class HawkesBase(torch.nn.Module, ABC):
 
             # Check for NaN gradients
             for n, p in self.named_parameters():
-                # print(f"{n} grad: {p.grad}")
                 if torch.isnan(p.grad).any():
                     self.logger.error(f"Gradient of {n} is nan at epoch {epoch + 1}")
                     self.logger.info(p.grad)
                     raise ValueError(f"Gradient of {n} is nan")
-            # DEBUG: compare
-            # sigmoid = torch.sigmoid(self._inv_alpha)
-            # print((self._inv_alpha.grad / sigmoid - CORRECT_GRAD / sigmoid).abs())
-            # exit(1)
 
             optimizer.step()
             losses.append(loss.item())
