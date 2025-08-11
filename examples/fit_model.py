@@ -93,11 +93,11 @@ match args.model_type:
             M=args.M,
             gamma=torch.tensor(est_gamma).to(args.device),
             init_scale=est_init_scale,
-            gamma_param=False,  # TODO: Disable this
-            debug_config=config.HawkesDebugConfig(
-                check_grad_epsilon=1e-4,
-                detect_anomalies=True,
-            ),
+            gamma_param=False,
+            # debug_config=config.HawkesDebugConfig(
+            #     check_grad_epsilon=1e-4,
+            #     detect_anomalies=True,
+            # ),
         ).to(args.device)
     case "low-rank":
         model_est = models.HawkesLowRank(

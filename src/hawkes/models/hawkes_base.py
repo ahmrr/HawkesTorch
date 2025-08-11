@@ -20,6 +20,7 @@ class HawkesNLL(torch.autograd.Function):
         mu: torch.Tensor,
         alpha: torch.Tensor,
         gamma: torch.Tensor,
+        gamma_param: bool,
         intensity_at_events_fun: typing.Callable,
         integrated_intensity_fun: typing.Callable,
         M: int,
@@ -43,6 +44,8 @@ class HawkesNLL(torch.autograd.Function):
 
         # TODO: Make batching work properly
         intensity = torch.empty(N, device=ti.device)
+        transition_matrices = torch.empty(K, N, M + 1, device=ti.device)
+        states = torch.empty(N, M, K, device=ti.device)
         for batch_start in range(0, N, batch_size):
             Nb = min(batch_size, N - batch_start)
 
@@ -50,7 +53,12 @@ class HawkesNLL(torch.autograd.Function):
                 T, ti, mi, batching=True, batch_start=batch_start, batch_size=Nb
             )
 
-            batch_intensity, prev_state = intensity_at_events_fun(
+            (
+                batch_intensity,
+                prev_state,
+                batch_transition_matrices,
+                batch_states,
+            ) = intensity_at_events_fun(
                 ti,
                 mi,
                 full_intensity=False,
@@ -58,12 +66,31 @@ class HawkesNLL(torch.autograd.Function):
                 batch_start=batch_start,
                 batch_size=Nb,
                 batch_prev_state=prev_state,
+                return_transition_matrices=True,
+                return_states=True,
             )
             nll_neg_logsum -= torch.sum(torch.log(batch_intensity))
             intensity[batch_start : (batch_start + Nb)] = batch_intensity.squeeze()
+            transition_matrices[
+                batch_start : (batch_start + Nb)
+            ] = batch_transition_matrices
+            states[batch_start : (batch_start + Nb)] = batch_states
 
         ctx.M, ctx.K, ctx.T = M, K, T
-        ctx.save_for_backward(intensity, gamma, ti, mi)
+        ctx.gamma_param = gamma_param
+        ctx.save_for_backward(
+            intensity,
+            transition_matrices if gamma_param else None,
+            (
+                torch.gather(states, dim=1, index=mi[:, None, None])
+                if gamma_param
+                else None
+            ),
+            alpha,
+            gamma,
+            ti,
+            mi,
+        )
 
         return (nll_neg_logsum + nll_int) / N
 
@@ -71,9 +98,20 @@ class HawkesNLL(torch.autograd.Function):
     def backward(ctx: typing.Any, grad_output: torch.Tensor):
         # TODO: can use existing intensity exp_decay, maybe that would save some time or mem
 
-        intensity, gamma, ti, mi = ctx.saved_tensors
+        (
+            intensity,
+            intensity_transition_matrices,
+            intensity_states,
+            alpha,
+            gamma,
+            ti,
+            mi,
+        ) = ctx.saved_tensors
         M, K, T = ctx.M, ctx.K, ctx.T
         N = ti.shape[1]
+
+        # Multiply all gradients by this quantity
+        grad_scale = -grad_output / N
 
         dti = ti - torch.cat([ti[:, 0:1, :], ti[:, 0:-1, :]], dim=1)  # Shape: [1, N, 1]
         exp_decay = torch.exp(-gamma * dti).permute(2, 1, 0)  # Shape: [K, N, 1]
@@ -87,17 +125,55 @@ class HawkesNLL(torch.autograd.Function):
 
         # Compute K sequence (of shape [N, M, K]) where K[:, q, k] corresponds to alpha[p, q, k]
 
-        transition_matrices = torch.cat(
+        alpha_transition_matrices = torch.cat(
             [exp_decay, exp_decay * one_hot_vectors], dim=2
         )  # Shape: [K, N, M+1]
 
         # Perform prefix scan on transition matrices
-        prefix_matrices = _torch_scan.prefix_scan(
-            transition_matrices, prefix_func=_torch_scan.state_mult, dim=1
+        alpha_prefix_matrices = _torch_scan.prefix_scan(
+            alpha_transition_matrices, prefix_func=_torch_scan.state_mult, dim=1
         )  # Shape: [K, N, M+1]
 
         # Extract states from prefix matrices
-        states = prefix_matrices[:, :, 1:].permute(1, 2, 0)  # Shape: [N, M, K]
+        alpha_states = alpha_prefix_matrices[:, :, 1:].permute(
+            1, 2, 0
+        )  # Shape: [N, M, K]
+
+        if ctx.gamma_param:
+            tim1 = torch.cat(
+                [
+                    torch.zeros((1, 1, 1), device=ti.device),
+                    ti[:, 0:-1, :],
+                ],
+                dim=1,
+            )  # Shape: [1, N, 1]
+
+            intensity_transition_matrices[:, :, 1:] *= tim1
+            gamma_prefix_matrices = _torch_scan.prefix_scan(
+                intensity_transition_matrices, prefix_func=_torch_scan.state_mult, dim=1
+            )  # Shape: [K, N, M+1]
+
+            gamma_states = gamma_prefix_matrices[:, :, 1:].permute(
+                1, 2, 0
+            )  # Shape: [N, M, K]
+            gamma_states_at_events = torch.gather(
+                gamma_states, dim=1, index=mi[:, None, None]
+            )  # Shape: [N, 1, K]
+
+            gamma_state_sum = torch.sum(
+                (
+                    (1 - gamma * ti.squeeze(0)) * intensity_states.squeeze(1)
+                    + gamma * gamma_states_at_events.squeeze(1)
+                )
+                / intensity.unsqueeze(-1),
+                dim=0,
+            )  # Shape: [K]
+            gamma_exp_decay_sum = torch.sum(
+                alpha[:, mi, :]
+                * (T - ti)
+                * torch.exp(-gamma[:, None, None] * (T - ti)),
+                dim=(1, 2),
+            )  # Shape: [K]
 
         # Obtain sorting indices of event nodes and the length of each node type in the sorted tensor
         mi_sorted, idx = torch.sort(mi, stable=True)
@@ -111,39 +187,47 @@ class HawkesNLL(torch.autograd.Function):
         intensity_split = torch.split(
             intensity[idx, None, None], mi_counts, dim=0
         )  # Shape: [M, Np, 1, 1]
-        states_split = torch.split(
-            states[idx], mi_counts, dim=0
+        alpha_states_split = torch.split(
+            alpha_states[idx], mi_counts, dim=0
         )  # Shape: [M, Np, M, K]
 
-        # Compute mu gradient; only depends on each node type's intensity
-        mu_grad = torch.tensor(
-            [λp.reciprocal().sum() - T for λp in intensity_split], device=ti.device
-        )  # Shape: [M]
-
         # Compute alpha gradient components using intensity and prefix matrices
-        intensity_state_sum = torch.stack(
+        alpha_intensity_state_sum = torch.stack(
             [
                 (gamma * Kp / λp).sum(dim=0)
-                for (Kp, λp) in zip(states_split, intensity_split)
+                for (Kp, λp) in zip(alpha_states_split, intensity_split)
             ],
             dim=0,
         )  # Shape: [M, M, K]
-        exp_decay_sum = torch.stack(
+        alpha_exp_decay_sum = torch.stack(
             [-torch.expm1(-gamma * (T - tiq)).sum(dim=1) for tiq in ti_split],
             dim=1,
         )  # Shape: [M, K]
 
-        alpha_grad = (intensity_state_sum - exp_decay_sum).permute(2, 1, 0)
+        # Compute gradients
 
-        # TODO: Handle parametrized gamma case
-        gamma_grad = None
+        # Gradient for mu only depends on each node type's intensity
+        mu_grad = grad_scale * torch.tensor(
+            [λp.reciprocal().sum() - T for λp in intensity_split], device=ti.device
+        )  # Shape: [M]
 
-        # Return negative of log-likelihood gradient scaled by 1/N
+        # Gradient for alpha uses prior computed components
+        # Permute indices to fit shape of alpha
+        alpha_grad = grad_scale * (
+            alpha_intensity_state_sum - alpha_exp_decay_sum
+        ).permute(2, 1, 0)
+
+        # If applicable, compute gradient for gamma using components
+        if ctx.gamma_param:
+            gamma_grad = grad_scale * (gamma_state_sum - gamma_exp_decay_sum)
+        else:
+            gamma_grad = None
+
         return (
-            -mu_grad * grad_output / N,
-            -alpha_grad * grad_output / N,
+            mu_grad,
+            alpha_grad,
             gamma_grad,
-        ) + (None,) * 7
+        ) + (None,) * 8
 
 
 class HawkesBase(torch.nn.Module, ABC):
@@ -329,10 +413,10 @@ class HawkesBase(torch.nn.Module, ABC):
             optimizer.zero_grad()
 
             # Calculate NLL across entire data and perform the backward pass
-            nll = self.nll(T, ti, mi)
-            # nll = self._compute_nll(
-            #     T, ti, mi, batch_size=fit_config.batch_size, compute_backward=True
-            # )
+            # nll = self.nll(T, ti, mi)
+            nll = self._compute_nll(
+                T, ti, mi, batch_size=fit_config.batch_size, compute_backward=True
+            )
 
             if fit_config.l1_penalty > 0:
                 l1_mu = torch.where(self.mu < fit_config.l1_hinge, self.mu, 0).sum()
@@ -351,10 +435,11 @@ class HawkesBase(torch.nn.Module, ABC):
             else:
                 nuclear_norm = 0
 
+            (l1 + nuclear_norm).backward()
             loss = nll + l1 + nuclear_norm
-            loss.backward(
-                retain_graph=(self.debug_config.check_grad_epsilon < torch.inf)
-            )
+            # loss.backward(
+            #     retain_graph=(self.debug_config.check_grad_epsilon < torch.inf)
+            # )
 
             # Check for NaN gradients
             for n, p in self.named_parameters():
@@ -454,6 +539,7 @@ class HawkesBase(torch.nn.Module, ABC):
             self.mu,
             self.alpha,
             self.gamma,
+            any([("gamma" in n) for n, _ in self.named_parameters()]),
             self.intensity_at_events,
             self.integrated_intensity,
             self.M,
@@ -626,6 +712,7 @@ class HawkesBase(torch.nn.Module, ABC):
         batch_start=0,
         batch_size=None,
         batch_prev_state: torch.Tensor = None,
+        return_transition_matrices=False,
         return_states=False,
     ) -> torch.Tensor:
         """
@@ -711,6 +798,8 @@ class HawkesBase(torch.nn.Module, ABC):
         res = (λ,)
         if batching:
             res += (P[:, -1, :],)
+        if return_transition_matrices:
+            res += (transition_matrices,)
         if return_states:
             res += (R,)
 
