@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e
+
 export PYTHONPATH=../src
 
 RUN_SIM=true
