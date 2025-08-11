@@ -1,7 +1,6 @@
 import math
 import torch
 import typing
-import torch.nn.functional as F
 
 from . import HawkesBase
 from ..utils import config, _torch_scan

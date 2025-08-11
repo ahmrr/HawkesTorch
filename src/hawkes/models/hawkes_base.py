@@ -20,7 +20,7 @@ class HawkesNLL(torch.autograd.Function):
         mu: torch.Tensor,
         alpha: torch.Tensor,
         gamma: torch.Tensor,
-        intensity_fun: typing.Callable,
+        intensity_at_events_fun: typing.Callable,
         integrated_intensity_fun: typing.Callable,
         M: int,
         K: int,
@@ -50,7 +50,7 @@ class HawkesNLL(torch.autograd.Function):
                 T, ti, mi, batching=True, batch_start=batch_start, batch_size=Nb
             )
 
-            batch_intensity, prev_state = intensity_fun(
+            batch_intensity, prev_state = intensity_at_events_fun(
                 ti,
                 mi,
                 full_intensity=False,
@@ -298,6 +298,9 @@ class HawkesBase(torch.nn.Module, ABC):
 
         N = ti.shape[1]
 
+        if self.debug_config.detect_anomalies:
+            torch.autograd.set_detect_anomaly(True)
+
         # Log training configuration
         self.logger.info(f"Starting Hawkes process training: {self.__class__.__name__}")
         self.logger.info(
@@ -327,7 +330,6 @@ class HawkesBase(torch.nn.Module, ABC):
 
             # Calculate NLL across entire data and perform the backward pass
             nll = self.nll(T, ti, mi)
-            nll.backward()
             # nll = self._compute_nll(
             #     T, ti, mi, batch_size=fit_config.batch_size, compute_backward=True
             # )
@@ -344,13 +346,15 @@ class HawkesBase(torch.nn.Module, ABC):
             if fit_config.nuc_penalty > 0:
                 nuclear_norm = (
                     fit_config.nuc_penalty
-                    * torch.norm(self.alpha, p="nuc", dim=(1, 2)).sum()
+                    * torch.linalg.matrix_norm(self.alpha, ord="nuc", dim=(1, 2)).sum()
                 )
             else:
                 nuclear_norm = 0
 
-            (l1 + nuclear_norm).backward()
             loss = nll + l1 + nuclear_norm
+            loss.backward(
+                retain_graph=(self.debug_config.check_grad_epsilon < torch.inf)
+            )
 
             # Check for NaN gradients
             for n, p in self.named_parameters():
@@ -358,6 +362,12 @@ class HawkesBase(torch.nn.Module, ABC):
                     self.logger.error(f"Gradient of {n} is nan at epoch {epoch + 1}")
                     self.logger.info(p.grad)
                     raise ValueError(f"Gradient of {n} is nan")
+
+            if self.debug_config.check_grad_epsilon < torch.inf:
+                param_grads = torch.autograd.grad(
+                    (self._compute_nll(T, ti, mi) + l1 + nuclear_norm),
+                    self.parameters(),
+                )
 
             optimizer.step()
             losses.append(loss.item())
@@ -384,6 +394,23 @@ class HawkesBase(torch.nn.Module, ABC):
                         f"μ_mean={self.mu.mean().item():.4f}, "
                         f"α_mean={self.alpha.mean().item():.4f}"
                     )
+
+                if self.debug_config.check_grad_epsilon < torch.inf:
+                    for (n, p), grad_auto in zip(self.named_parameters(), param_grads):
+                        abs_diff = torch.abs(p.grad - grad_auto)
+                        rel_diff = abs_diff / ((p.grad + grad_auto) / 2)
+                        self.logger.info(
+                            f" >- Absolute gradient diff for {n}: "
+                            f"min={float(abs_diff.min()):.2e}, "
+                            f"max={float(abs_diff.max()):.2e}, "
+                            f"avg={float(abs_diff.mean()):.2e}"
+                        )
+                        self.logger.info(
+                            f" >- Relative gradient diff for {n}: "
+                            f"min={float(rel_diff.abs().min()):.2e}, "
+                            f"max={float(rel_diff.abs().max()):.2e}, "
+                            f"avg={float(rel_diff.abs().mean()):.2e}"
+                        )
 
         peak_mem_gpu = torch.cuda.max_memory_allocated()
         fit_time_real = time.perf_counter() - fit_time_real

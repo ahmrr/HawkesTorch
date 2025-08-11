@@ -38,15 +38,17 @@ class HawkesDebugConfig:
         profile_mem_entries: Maximum number of recorded memory entries, if memory profiling is enabled
     """
 
-    deterministic_sim: bool = True
+    deterministic_sim: bool = False
     profile_mem_iters: int = 0
     profile_mem_entries: int = 100000
+    check_grad_epsilon: float = torch.inf
+    detect_anomalies: bool = False
 
 
 @dataclass
 class Transformation:
     """
-    Utility dataclass storing a type of transformation to map the learned parameters in a Hawkes model. Given defaults are EXP and SOFTPLUS.
+    Utility dataclass storing a type of transformation to map the learned parameters in a Hawkes model. Given defaults are IDENTITY, EXP, and SOFTPLUS.
 
     Attributes:
         forward: The vectorized transformation function
