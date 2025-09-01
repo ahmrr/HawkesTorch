@@ -93,11 +93,8 @@ match args.model_type:
             M=args.M,
             gamma=torch.tensor(est_gamma).to(args.device),
             init_scale=est_init_scale,
-            gamma_param=False,
-            # debug_config=config.HawkesDebugConfig(
-            #     check_grad_epsilon=1e-4,
-            #     detect_anomalies=True,
-            # ),
+            gamma_param=True,
+            # debug_config=config.HawkesDebugConfig(check_grad_epsilon=True),
         ).to(args.device)
     case "low-rank":
         model_est = models.HawkesLowRank(
@@ -106,6 +103,7 @@ match args.model_type:
             rank=est_rank,
             init_scale=est_init_scale,
             gamma_param=True,
+            # debug_config=config.HawkesDebugConfig(check_grad_epsilon=True),
         ).to(args.device)
     case "upper-triangular":
         model_est = models.HawkesUpperTriangular(
@@ -117,7 +115,7 @@ match args.model_type:
         ).to(args.device)
 
 _ = model_est.fit(
-    float(ti.max()), ti, mi, fit_config
+    args.T, ti, mi, fit_config
 )  # Use a large number to capture all events
 
 # Save estimated model

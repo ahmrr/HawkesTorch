@@ -1,7 +1,10 @@
 __pycache__/
 
-examples/outputs/data/
+examples/outputs/*
+!examples/outputs/plots/*
+
 
 todo
 *.log
 *.pt
+*.pkl

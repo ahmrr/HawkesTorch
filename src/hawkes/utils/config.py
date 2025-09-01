@@ -41,7 +41,7 @@ class HawkesDebugConfig:
     deterministic_sim: bool = False
     profile_mem_iters: int = 0
     profile_mem_entries: int = 100000
-    check_grad_epsilon: float = torch.inf
+    check_grad_epsilon: bool = False
     detect_anomalies: bool = False
 
 

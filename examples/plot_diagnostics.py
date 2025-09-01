@@ -67,8 +67,8 @@ args = parser.parse_args()
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
 # Obtain event sequence and reference interaction matrix
-model_sim = torch.load(args.model_sim_file)
-model_est = torch.load(args.model_est_file)
+model_sim = torch.load(args.model_sim_file, weights_only=False)
+model_est = torch.load(args.model_est_file, weights_only=False)
 
 # Save diagnostic and residual plots
 plotting.plot_diagnostic(

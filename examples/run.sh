@@ -1,29 +1,36 @@
 #!/bin/bash
 
-set -e
+SIM_ARGS="--deterministic-sim --M 10 --N 10000 --T 1000000"
+FIT_ARGS="--model-type=low-rank --M 10 --N 10000 --T 1000000"
 
-export PYTHONPATH=../src
+set -euo pipefail
 
 RUN_SIM=true
+RUN_FIT=true
 RUN_PLOT=true
 SAVE_LOG=true
+
 for arg in "$@"; do
     case "$arg" in
         --no-sim)   RUN_SIM=false ;;
+        --no-fit)   RUN_FIT=false ;;
         --no-plot)  RUN_PLOT=false ;;
         --no-log)   SAVE_LOG=false ;;
-        *) echo "Unknown option: $arg" >&2; exit 1 ;;
     esac
 done
 
-exec > >(tee run.log) 2>&1
-
-if [ "$RUN_SIM" = true ]; then
-    python simulate_data.py --deterministic-sim
+if $SAVE_LOG; then
+    exec > >(tee run.log) 2>&1
 fi
 
-python fit_model.py --model-type=full-rank
+export PYTHONPATH=../src
 
-if [ "$RUN_PLOT" = true ]; then
-    python plot_diagnostics.py
-fi
+declare -A commands=(
+    [sim]="python simulate_data.py $SIM_ARGS"
+    [fit]="python fit_model.py $FIT_ARGS"
+    [plot]="python plot_diagnostics.py"
+)
+
+$RUN_SIM  && ${commands[sim]}
+$RUN_FIT  && ${commands[fit]}
+$RUN_PLOT && ${commands[plot]}
