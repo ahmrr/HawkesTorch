@@ -1,9 +1,14 @@
+# import os
+
+# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+# os.environ["TORCH_USE_CUDA_DSA"] = "1"
+
 import torch
 import logging
 import argparse
 import numpy as np
 
-from hawkes import models
+from hawkes import models, utils
 from hawkes.utils import config, plotting
 
 # Setup logging and argument parsing
@@ -71,6 +76,7 @@ args = parser.parse_args()
 
 # Obtain event sequence and reference interaction matrix
 ti, mi = torch.load(args.events_file, weights_only=True)
+event_seq = utils.EventSequence(ti, mi, args.M, args.N, args.T)
 
 # Fitting hyperparameters
 fit_config = config.HawkesFitConfig(
@@ -94,7 +100,10 @@ match args.model_type:
             gamma=torch.tensor(est_gamma).to(args.device),
             init_scale=est_init_scale,
             gamma_param=True,
-            # debug_config=config.HawkesDebugConfig(check_grad_epsilon=True),
+            debug_config=config.HawkesDebugConfig(
+                check_grad_epsilon=False,
+                use_autograd_gradients=False,
+            ),
         ).to(args.device)
     case "low-rank":
         model_est = models.HawkesLowRank(
@@ -103,7 +112,10 @@ match args.model_type:
             rank=est_rank,
             init_scale=est_init_scale,
             gamma_param=True,
-            # debug_config=config.HawkesDebugConfig(check_grad_epsilon=True),
+            debug_config=config.HawkesDebugConfig(
+                check_grad_epsilon=False,
+                use_autograd_gradients=False,
+            ),
         ).to(args.device)
     case "upper-triangular":
         model_est = models.HawkesUpperTriangular(
@@ -112,11 +124,13 @@ match args.model_type:
             rank=est_rank,
             init_scale=est_init_scale,
             gamma_param=True,
+            debug_config=config.HawkesDebugConfig(
+                check_grad_epsilon=False,
+                use_autograd_gradients=False,
+            ),
         ).to(args.device)
 
-_ = model_est.fit(
-    args.T, ti, mi, fit_config
-)  # Use a large number to capture all events
+_ = model_est.fit(event_seq, fit_config)
 
 # Save estimated model
 torch.save(model_est, args.model_est_file)

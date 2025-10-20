@@ -117,11 +117,13 @@ model_sim.alpha = (
 
 # Simulate the event sequence and save intensity plot
 ti, mi = model_sim.simulate(T=args.T, max_events=args.N)
-logger.info(f"Simulated event sequence of length {ti.shape[1]}")
-plotting.plot_intensity(
-    model_sim, ti, mi, T=args.T, M=args.M, output=args.intensity_plot
-)
-logger.info(f"Saved intensity plot to {args.intensity_plot}")
+logger.info(f"Simulated event sequence of length {ti.shape[0]}")
+
+if args.intensity_plot != "false":
+    plotting.plot_intensity(
+        model_sim, ti, mi, T=args.T, M=args.M, output=args.intensity_plot
+    )
+    logger.info(f"Saved intensity plot to {args.intensity_plot}")
 
 # Save simulated event sequence and simulation model
 torch.save((ti, mi), args.events_file)

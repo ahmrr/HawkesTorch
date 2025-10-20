@@ -43,6 +43,7 @@ class HawkesDebugConfig:
     profile_mem_entries: int = 100000
     check_grad_epsilon: bool = False
     detect_anomalies: bool = False
+    use_autograd_gradients: bool = False
 
 
 @dataclass

@@ -5,6 +5,7 @@ import typing
 import logging
 from abc import ABC, abstractmethod
 
+from .. import utils
 from ..utils import config, _torch_scan
 
 
@@ -108,18 +109,20 @@ class HawkesBase(torch.nn.Module, ABC):
         Terminates when an event time exceeds T or when max_events is reached.
 
         Returns:
-            ti: Tensor of event times shaped (1, N, 1)
-            mi: Tensor of event types shaped (N,)
+            ti: Tensor of event times with shape (N,)
+            mi: Tensor of event types with shape (N,)
         """
 
         t = 0.0
-        ti = torch.zeros(1, 0, 1, device=self.device)
+        ti = torch.zeros(0, device=self.device)
         mi = torch.zeros(0, dtype=torch.long, device=self.device)
 
         R_λ = None  # right-limit state (R) after the most recent accepted event
 
+        # self.logger.info("Simulating data")
+
         with torch.no_grad():
-            while t < T and ti.shape[1] < max_events:
+            while t < T and ti.shape[0] < max_events:
                 # Upper-bound intensity (sum across nodes) at current state
                 λ_star = self.intensity_at_next_event(t, None, ti, mi, R_λ).sum()
 
@@ -132,7 +135,7 @@ class HawkesBase(torch.nn.Module, ABC):
 
                 # Compute intensity at candidate time and proposed new state
                 λ_t, R = self.intensity_at_next_event(
-                    t, None, ti, mi, R_λ, next_state=True
+                    t, None, ti, mi, R_λ, return_next_state=True
                 )
                 λ_star_new = λ_t.sum()
 
@@ -150,15 +153,17 @@ class HawkesBase(torch.nn.Module, ABC):
                         logits=torch.log(p)
                     ).sample()
                     mi = torch.cat([mi, event_type])
-                    ti = torch.cat(
-                        [ti, torch.tensor([t], device=self.device).reshape(1, 1, 1)],
-                        dim=1,
-                    )
+                    ti = torch.cat([ti, torch.tensor([t], device=self.device)])
                     R_λ = R  # update right-limit state
+
+                # if ti.shape[0] % (max_events // 10) == 0:
+                #     self.logger.info(f"{(max_events // 10)} events completed")
 
         return ti, mi
 
-    def fit(self, T, ti, mi, fit_config=config.HawkesFitConfig()) -> list:
+    def fit(
+        self, seq: utils.EventSequence, fit_config=config.HawkesFitConfig()
+    ) -> list:
         """
         Fit model parameters by maximizing likelihood (minimizing NLL).
 
@@ -166,7 +171,7 @@ class HawkesBase(torch.nn.Module, ABC):
             List of scalar loss values (training loss per epoch).
         """
 
-        N = ti.shape[1]
+        assert seq.M <= self.M
 
         if self.debug_config.detect_anomalies:
             torch.autograd.set_detect_anomaly(True)
@@ -174,7 +179,7 @@ class HawkesBase(torch.nn.Module, ABC):
         # Logging basic training configuration and model size
         self.logger.info(f"Starting Hawkes process training: {self.__class__.__name__}")
         self.logger.info(
-            f"Configuration: M={self.M}, K={self.K}, N={N:,}, steps={fit_config.num_steps}"
+            f"Configuration: M={self.M}, K={self.K}, N={seq.N:,}, steps={fit_config.num_steps}"
         )
         self.logger.info(
             f"Parameters: lr={fit_config.learning_rate}, l1={fit_config.l1_penalty}, nuc={fit_config.nuc_penalty}"
@@ -199,7 +204,11 @@ class HawkesBase(torch.nn.Module, ABC):
             optimizer.zero_grad()
 
             # Compute NLL (forward + backward handled by custom Function)
-            nll = self.nll(T, ti, mi)
+            nll = (
+                self.nll(seq)
+                if not self.debug_config.use_autograd_gradients
+                else self._compute_nll(seq, compute_backward=True)
+            )
 
             # Optional L1 hinge penalty applied to small parameters
             if fit_config.l1_penalty > 0:
@@ -221,10 +230,13 @@ class HawkesBase(torch.nn.Module, ABC):
                 nuclear_norm = 0
 
             loss = nll + l1 + nuclear_norm
-            # Backpropagate (retain_graph when debugging gradient comparisons)
-            loss.backward(retain_graph=self.debug_config.check_grad_epsilon)
+            if self.debug_config.use_autograd_gradients:
+                (l1 + nuclear_norm).backward()
+            else:
+                # Backpropagate (retain_graph when debugging gradient comparisons)
+                loss.backward(retain_graph=self.debug_config.check_grad_epsilon)
 
-            # Validate gradients are finite
+            # Ensure gradients are finite
             for n, p in self.named_parameters():
                 if torch.isnan(p.grad).any():
                     self.logger.error(f"Gradient of {n} is nan at epoch {epoch + 1}")
@@ -234,7 +246,7 @@ class HawkesBase(torch.nn.Module, ABC):
             # Optionally compute autograd gradients for cross-checking
             if self.debug_config.check_grad_epsilon:
                 param_grads = torch.autograd.grad(
-                    (self._compute_nll(T, ti, mi) + l1 + nuclear_norm),
+                    (self._compute_nll(seq.T, seq.ti, seq.mi) + l1 + nuclear_norm),
                     self.parameters(),
                 )
 
@@ -244,11 +256,14 @@ class HawkesBase(torch.nn.Module, ABC):
             if epoch >= self.debug_config.profile_mem_iters:
                 torch.cuda.memory._record_memory_history(enabled=None)
 
-            # Periodic logging with fuller diagnostics
+            # Periodic logging with more diagnostics
             if (epoch + 1) % fit_config.monitor_interval == 0:
                 with torch.no_grad():
                     full_nll = self._compute_nll(
-                        T, ti, mi, batch_size=fit_config.batch_size
+                        seq.T,
+                        seq.ti,
+                        seq.mi,
+                        batch_size=fit_config.batch_size,
                     )
                     sparsity_factor = (
                         self.alpha.isclose(
@@ -264,6 +279,7 @@ class HawkesBase(torch.nn.Module, ABC):
                         f"α_mean={self.alpha.mean().item():.4f}"
                     )
 
+                # Checking manual gradients against autograd
                 if self.debug_config.check_grad_epsilon:
                     for (n, p), grad_auto in zip(self.named_parameters(), param_grads):
                         abs_diff = torch.abs(p.grad - grad_auto)
@@ -285,7 +301,7 @@ class HawkesBase(torch.nn.Module, ABC):
         fit_time_real = time.perf_counter() - fit_time_real
 
         if self.debug_config.profile_mem_iters:
-            mem_file = f"outputs/mem/mem_snapshot_n{N}_m{self.M}_b{batch_size}_e{self.debug_config.profile_mem_iters}.pkl"
+            mem_file = f"outputs/mem/mem_snapshot_n{seq.N}_m{self.M}_b{batch_size}_e{self.debug_config.profile_mem_iters}.pkl"
             torch.cuda.memory._dump_snapshot(mem_file)
             self.logger.info(f"Saved memory profiling snapshot at {mem_file}")
 
@@ -312,26 +328,77 @@ class HawkesBase(torch.nn.Module, ABC):
 
         return losses
 
-    def nll(
-        self,
-        T: float,
-        ti: torch.Tensor,
-        mi: torch.Tensor,
-    ):
+    def nll(self, seq, compute_backward=False):
         # TODO: Incorporate and support batching
-        return HawkesNLL.apply(
-            self.mu,
-            self.alpha,
-            self.gamma,
-            any([("gamma" in n) for n, _ in self.named_parameters()]),
-            self.intensity_at_events,
-            self.integrated_intensity,
-            self.M,
-            self.K,
-            T,
-            ti,
-            mi,
-        )
+        # return HawkesNLL.apply(
+        #     self.mu,
+        #     self.alpha,
+        #     self.gamma,
+        #     any([("gamma" in n) for n, _ in self.named_parameters()]),
+        #     self.intensity_at_events,
+        #     self.integrated_intensity,
+        #     self.M,
+        #     self.K,
+        #     seq.T,
+        #     seq.ti,
+        #     seq.mi,
+        # )
+
+        batch_size = batch_size or seq.N
+
+        nll_logsum = 0.0
+        nll_int = 0.0
+
+        # To multiply each NLL component by
+        nll_scale = -(1 / seq.N)
+
+        prev_state = None
+        for bs in range(0, seq.N, batch_size):
+            be = min(bs + batch_size, seq.N)
+
+            integral_term = nll_scale * self.integrated_intensity(
+                seq.T, seq.ti[bs:be], seq.mi[bs:be]
+            )
+            if compute_backward:
+                integral_term.backward()
+
+            intensity = nll_scale * (
+                self.mu[:, None]
+                + self.intensity_at_events(seq.T, seq.ti[bs:be], seq.mi[bs:be])
+            )
+            if compute_backward:
+                intensity.backward()
+
+            batch_integrated_intensity = (
+                self.integrated_intensity(
+                    T,
+                    ti,
+                    mi,
+                    batching=True,
+                    batch_start=batch_start,
+                    batch_size=Nb,
+                )
+                / N
+            )
+            if compute_backward:
+                batch_integrated_intensity.backward()
+
+            # Compute batch intensities; prev_state ensures continuity across batches
+            batch_intensity, prev_state = self.intensity_at_events(
+                ti,
+                mi,
+                full_intensity=False,
+                batching=True,
+                batch_start=batch_start,
+                batch_size=Nb,
+                batch_prev_state=prev_state,
+            )
+            batch_logsum = torch.sum(torch.log(batch_intensity)) / N
+
+            nll_int += batch_integrated_intensity
+            nll_neg_logsum += batch_logsum
+
+        return -(nll_neg_logsum - nll_int) / N
 
     def _compute_nll(
         self,
@@ -347,8 +414,8 @@ class HawkesBase(torch.nn.Module, ABC):
 
         Args:
             T: End time of observation period
-            ti: Tensor of event times shaped (1, N, 1)
-            mi: Tensor of event types shaped (N,)
+            ti: Tensor of event times with shape (N,)
+            mi: Tensor of event types with shape (N,)
             batch_size: If provided, compute terms in batches of this many events
             compute_backward: If True, call backward() on each batch's contribution
                               to compute gradients in a batched way
@@ -357,7 +424,7 @@ class HawkesBase(torch.nn.Module, ABC):
             Scalar NLL (sum of -log-intensity at events and integrated intensity).
         """
 
-        N = ti.shape[1]
+        N = ti.shape[0]
         batch_size = batch_size or N
 
         nll_neg_logsum = 0.0
@@ -417,18 +484,17 @@ class HawkesBase(torch.nn.Module, ABC):
         subsequent batches to avoid double-counting mu * T.
         """
 
-        if batching and batch_size and batch_size < ti.shape[1]:
-            ti = ti[:, batch_start : (batch_start + batch_size), :]
+        if batching and batch_size and batch_size < ti.shape[0]:
+            ti = ti[batch_start : (batch_start + batch_size)]
             mi = mi[batch_start : (batch_start + batch_size)]
 
         # Consider only events that occurred before T
         mask = ti < T
-        ti = ti[mask].reshape(1, -1, 1)
-        mi = mi[mask.squeeze(0, 2)]
+        ti, mi = ti[mask], mi[mask]
 
         # Select alpha entries corresponding to the events and align dims
         alphas = self.alpha[:, mi].permute(1, 2, 0)[None]
-        ti = ti[..., None]
+        ti = ti[None, :, None, None]
 
         # Excitation contribution: sum_k sum_events α * (1 - e^{-γ_k (T - t_i)})
         excitation = torch.sum(alphas * (1 - torch.exp(-self.gamma * (T - ti))))
@@ -446,7 +512,7 @@ class HawkesBase(torch.nn.Module, ABC):
         ti: torch.Tensor,
         mi: torch.Tensor,
         prev_state: torch.Tensor = None,
-        next_state=False,
+        return_next_state=False,
     ) -> torch.Tensor:
         """
         Compute intensity at a candidate time t (and optionally the next state R)
@@ -462,23 +528,25 @@ class HawkesBase(torch.nn.Module, ABC):
             ti: Tensor of previous event times (1, N, 1)
             mi: Tensor of previous event types (N,)
             prev_state: Right-limit state R from the previous accepted event
-            next_state: If True, return both (λ, R) where R is the new right-limit
+            return_next_state: If True, return both (λ, R) where R is the new right-limit
 
         Returns:
-            If next_state is False: λ (1, M) vector of intensities at time t
-            If next_state is True: tuple (λ (1, M), R (K, M)) where R is next state
+            If return_next_state is False: λ (1, M) vector of intensities at time t
+            If return_next_state is True: tuple (λ (1, M), R (K, M)) where R is next state
         """
+
+        N = ti.shape[0]
 
         if prev_state is None:
             prev_state = torch.zeros(self.K, self.M, device=self.device)
 
         # time since last event (0 if no prior events)
-        dti = t - ti[0, -1, 0] if ti.shape[1] != 0 else 0
+        dti = t - ti[-1] if N != 0 else 0
 
         # alphas: contributions from the most recent event types, or zeros if none
         alphas = (
             self.alpha[:, mi[-1], :]
-            if mi.shape[0] != 0
+            if N != 0
             else torch.zeros(self.K, self.M, device=self.device)
         )  # Shape: [K, M]
 
@@ -489,12 +557,49 @@ class HawkesBase(torch.nn.Module, ABC):
 
         λ = self.mu + torch.sum(self.gamma * R, dim=0).unsqueeze(0)
 
-        if next_state:
+        if return_next_state:
             return λ, R  # λ shape: [1, M], R shape: [K, M]
         else:
             return λ
 
     def intensity_at_events(
+        self,
+        seq: utils.EventSequence | tuple[float, torch.Tensor, torch.Tensor],
+        prev_state: None,
+        get_full_intensity=True,
+    ) -> torch.Tensor:
+        """
+        Compute intensities at the sequence of event times ti using a state-augmented
+        matrix recurrence and prefix scan. This is the preferred fast implementation
+        for GPU/batched evaluation of the intensity terms used in NLL.
+
+        Args:
+            seq: Either an EventSequence object or tuple of (T, ti, mi)
+            full_intensity: If True, return the full M-dimensional intensity at
+                            each event; otherwise return only the intensity of the
+                            node that actually experienced the event at that time.
+            batch_size: Number of events to use in each batch, or None to disable batchin
+
+        Returns:
+            Depending on flags, returns λ (Nb x M) or (Nb x 1) plus optionally
+            the last prefix matrix (for batching) and the R states.
+        """
+
+        if not isinstance(seq, utils.EventSequence):
+            T, ti, mi = seq
+            seq = utils.EventSequence(ti, mi, T, M=self.M)
+
+        return self.mu[:, None] + HawkesExcitation.apply(
+            
+            self.alpha,
+            self.gamma,
+            any([("gamma" in n) for n, _ in self.named_parameters()]),
+            seq,
+            prev_state,
+            get_full_excitation,
+        )
+
+    def _intensity_at_events_reference_implementation(
         self,
         ti: torch.Tensor,
         mi: torch.Tensor,
@@ -531,7 +636,7 @@ class HawkesBase(torch.nn.Module, ABC):
         if not batching and (batch_start or batch_size or batch_prev_state):
             raise ValueError("batch arguments were given when batching is disabled")
 
-        N = ti.shape[1]
+        N = ti.shape[0]
 
         # Batch indices shorthand
         bs = batch_start
@@ -541,13 +646,13 @@ class HawkesBase(torch.nn.Module, ABC):
         # Compute inter-event times Δt and the corresponding alpha impulses
         # If this is not the first batch, Δt is computed relative to ti[bs-1]
         if bs != 0:
-            dti = ti[:, bs:be, :] - ti[:, (bs - 1) : (be - 1), :]  # Shape: [1, Nb, 1]
+            dti = ti[bs:be] - ti[(bs - 1) : (be - 1)]  # Shape: [Nb]
             alphas = self.alpha[:, mi[(bs - 1) : (be - 1)], :]  # Shape: [K, Nb, M]
         else:
             # For the first element in the batch, previous event is treated as zero
-            dti = ti[:, bs:be, :] - torch.cat(
-                [ti[:, bs : (bs + 1), :], ti[:, bs : (be - 1), :]], dim=1
-            )  # Shape: [1, Nb, 1]
+            dti = ti[bs:be] - torch.cat(
+                [ti[bs : (bs + 1)], ti[bs : (be - 1)]]
+            )  # Shape: [Nb]
             alphas = torch.cat(
                 [
                     torch.zeros(self.K, 1, self.M, device=self.device),
@@ -556,8 +661,8 @@ class HawkesBase(torch.nn.Module, ABC):
                 dim=1,
             )  # Shape: [K, Nb, M]
 
-        # Precompute decay factors e^{-γ_k Δt_i} with shape [K, Nb, 1]
-        exp_decay = torch.exp(-self.gamma * dti).permute(2, 1, 0)  # Shape: [K, Nb, 1]
+        # Precompute decay factors e^{-γ_k Δt_i} of shape [K, Nb, 1]
+        exp_decay = torch.exp(-self.gamma * dti[None, :, None]).permute(2, 1, 0)
 
         # Build transition matrices for each time step: [exp_decay, exp_decay * alphas]
         transition_matrices = torch.cat(
@@ -582,7 +687,8 @@ class HawkesBase(torch.nn.Module, ABC):
 
         # If only the intensity at the actual event node is required, pick it out
         if not full_intensity:
-            λ = torch.gather(λ, dim=1, index=mi[bs:be].unsqueeze(-1))  # Shape: [Nb, 1]
+            λ = torch.gather(λ, dim=1, index=mi[bs:be, None])  # Shape: [Nb, 1]
+            λ = λ.squeeze(1)
 
         # Return assembled results according to requested flags
         res = (λ,)
@@ -679,7 +785,7 @@ class HawkesBase(torch.nn.Module, ABC):
                 ), "m must have same number of elements as t"
 
         B = t.shape[0]
-        N = ti.shape[1]
+        N = ti.shape[0]
 
         # Compute pairwise time differences dt = t - ti with broadcasting
         dt = t - ti
@@ -736,6 +842,271 @@ class HawkesBase(torch.nn.Module, ABC):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
+class HawkesExcitation(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx: typing.Any,
+        alpha: torch.Tensor,
+        gamma: torch.Tensor,
+        gamma_param: bool,
+        seq: utils.EventSequence,
+        batch_size=None,
+        get_full_excitation=False,
+    ):
+        K = gamma.shape[0]
+        batch_size = batch_size or seq.N
+        batch_prev_state = None
+
+        excitation_at_events = torch.empty(N, device=ti.device)
+        if gamma_param:
+            states_at_events = torch.empty(N, K, device=ti.device)
+        if get_full_excitation:
+            full_excitation = torch.empty(N, M, device=ti.device)
+
+        for bs in range(0, seq.N, batch_size):
+            be = min(bs + batch_size, seq.N)
+            Nb = be - bs
+
+            # Compute inter-event times Δt and the corresponding alphas
+            # If this is not the first batch, Δt is computed relative to ti[bs-1]
+            if bs != 0:
+                dti = seq.ti[bs:be] - seq.ti[(bs - 1) : (be - 1)]  # Shape: [Nb]
+                alphas = self.alpha[
+                    :, seq.mi[(bs - 1) : (be - 1)], :
+                ]  # Shape: [K, Nb, M]
+            else:
+                # For the first element in the batch, previous event is treated as zero
+                dti = seq.ti[bs:be] - torch.cat(
+                    [seq.ti[bs : (bs + 1)], seq.ti[bs : (be - 1)]]
+                )  # Shape: [Nb]
+                alphas = torch.cat(
+                    [
+                        torch.zeros(self.K, 1, self.M, device=self.device),
+                        self.alpha[:, seq.mi[bs : (be - 1)], :],
+                    ],
+                    dim=1,
+                )  # Shape: [K, Nb, M]
+
+            dti = dti[None, :, None]
+
+            # Precompute decay factors e^{-γ_k Δt_i} of shape [K, Nb, 1]
+            exp_decay = torch.exp(-self.gamma * dti).permute(2, 1, 0)
+
+            # Build transition matrices for each time step: [exp_decay, exp_decay * alphas]
+            transition_matrices = torch.cat(
+                [exp_decay, exp_decay * alphas], dim=2
+            )  # Shape: [K, Nb, M+1]
+            if batch_prev_state is not None:
+                # Prepend previous prefix/state
+                transition_matrices = torch.cat(
+                    [batch_prev_state.unsqueeze(1), transition_matrices], dim=1
+                )  # Shape: [K, Nb+1, M+1]
+
+            # Compute prefix products P via scan; P contains augmented states
+            P = _torch_scan.prefix_scan(
+                transition_matrices, prefix_func=_torch_scan.state_mult, dim=1
+            )  # Shape: [K, Nb, M+1] or [K, Nb+1, M+1]
+
+            # Extract non-augmented right-limit states R for the last Nb prefixes
+            R = P[:, -Nb:, 1:].permute(1, 2, 0)  # Shape: [Nb, M, K]
+
+            # Convert states to excitations
+            excitation = torch.sum(self.gamma * R, dim=2)  # Shape: [Nb, M]
+
+            excitation_at_events[bs:be] = torch.gather(
+                excitation, dim=1, index=seq.mi[bs:be, None]
+            ).squeeze(1)
+
+            if gamma_param:
+                states_at_events[bs:be] = torch.gather(
+                    R, dim=1, index=seq.mi[bs:be, None, None]
+                ).squeeze(1)
+
+            if get_full_excitation:
+                full_excitation[bs:be] = excitation
+
+            batch_prev_state = P[:, -1, :]
+
+        # self.mu.unsqueeze(0) + excitation
+
+        # Save necessary things for backward
+        ctx.M, ctx.N, ctx.T, ctx.K = seq.M, seq.N, seq.T, K
+        ctx.gamma_param, ctx.batch_size = gamma_param, batch_size
+        ctx.save_for_backward(
+            alpha,
+            gamma,
+            seq.ti,
+            seq.mi,
+            excitation_at_events,
+            states_at_events if gamma_param else None,
+        )
+
+        return full_excitation if get_full_excitation else excitation_at_events
+
+    @staticmethod
+    def backward(ctx: typing.Any, grad_output: torch.Tensor):
+        (
+            alpha,
+            gamma,
+            ti,
+            mi,
+            excitation_at_events,
+            states_at_events,
+        ) = ctx.saved_tensors
+        seq = utils.EventSequence(ti, mi, ctx.M, ctx.N, ctx.T)
+
+        alpha_prev_state = None
+        gamma_prev_state = None
+
+        for bs in range(0, seq.N, ctx.batch_size):
+            be = min(bs + batch_size, seq.N)
+            Nb = be - bs
+
+            # dti: vector of inter-event times Δt_i = t_i - t_{i-1}; first Δt is 0
+            if bs != 0:
+                dti = seq.ti[bs:be] - seq.ti[(bs - 1) : (be - 1)]  # Shape: [Nb]
+                one_hot_vectors = torch.nn.functional.one_hot(
+                    seq.mi[(bs - 1) : (be - 1)], num_classes=seq.M
+                )  # Shape: [Nb, M]
+            else:
+                # For the first element in the batch, previous event is treated as zero
+                dti = seq.ti[bs:be] - torch.cat(
+                    [seq.ti[bs : (bs + 1)], seq.ti[bs : (be - 1)]]
+                )  # Shape: [Nb]
+                # one_hot_vectors encodes which node produced the previous event for each i.
+                # First column corresponds to a "no-previous-event" zero vector.
+                one_hot_vectors = torch.cat(
+                    [
+                        torch.zeros(seq.M, device=ti.device).unsqueeze(0),
+                        torch.nn.functional.one_hot(
+                            seq.mi[bs : (be - 1)], num_classes=seq.M
+                        ),
+                    ]
+                )  # Shape: [Nb, M]
+
+            # exp_decay is e^{-γ_k Δt_i} of shape [K, Nb, 1]
+            exp_decay = torch.exp(-gamma * dti[None, :, None]).permute(2, 1, 0)
+
+            # Build transition matrices for the alpha-state recurrence:
+            # Each transition row contains [exp_decay, exp_decay * one_hot_vector].
+            # Concatenate to shape [K, N, M+1]
+            alpha_transition_matrices = torch.cat(
+                [exp_decay, exp_decay * one_hot_vectors], dim=2
+            )  # Shape: [K, Nb, M+1]
+            if alpha_prev_state is not None:
+                alpha_transition_matrices = torch.cat(
+                    [alpha_prev_state.unsqueeze(1), alpha_transition_matrices], dim=1
+                )  # Shape: [K, Nb+1, M+1]
+
+            # Prefix-scan across time to get prefix transition products (prefix matrices)
+            alpha_prefix_matrices = _torch_scan.prefix_scan(
+                alpha_transition_matrices, prefix_func=_torch_scan.state_mult, dim=1
+            )  # Shape: [K, Nb, M+1]
+            alpha_prev_state = alpha_transition_matrices[:, -1, :]
+
+            # States with shape [Nb, M, K]
+            alpha_states = alpha_prefix_matrices[:, -Nb:, 1:].permute(1, 2, 0)
+
+            gamma_grad = None
+            if ctx.gamma_param:
+                if bs != 0:
+                    ti1 = seq.ti[(bs - 1) : (be - 1)]  # Shape: [Nb]
+                    alphas = self.alpha[
+                        :, seq.mi[(bs - 1) : (be - 1)], :
+                    ]  # Shape: [K, Nb, M]
+                else:
+                    ti1 = torch.cat(
+                        [
+                            torch.tensor([0], device=seq.ti.device),
+                            seq.ti[bs : (be - 1)],
+                        ]
+                    )  # Shape: [Nb]
+                    alphas = torch.cat(
+                        [
+                            torch.zeros(self.K, 1, self.M, device=self.device),
+                            self.alpha[:, seq.mi[bs : (be - 1)], :],
+                        ],
+                        dim=1,
+                    )  # Shape: [K, Nb, M]
+
+                # Build analogous transition matrices for d/dγ terms.
+                gamma_transition_matrices = torch.cat(
+                    [exp_decay, ti1[None, :, None] * exp_decay * alphas], dim=2
+                )  # Shape: [K, Nb, M+1]
+                gamma_prefix_matrices = _torch_scan.prefix_scan(
+                    gamma_transition_matrices, prefix_func=_torch_scan.state_mult, dim=1
+                )  # Shape: [K, Nb, M+1]
+                gamma_prev_state = gamma_transition_matrices[:, -1, :]
+
+                # States with shape [Nb, M, K]
+                gamma_states = gamma_prefix_matrices[:, -Nb:, 1:].permute(1, 2, 0)
+
+                # Gather the per-event gamma state of shape [N, K]
+                gamma_states_at_events = torch.gather(
+                    gamma_states, dim=1, index=mi[:, None, None].expand(-1, 1, K)
+                ).squeeze(1)
+
+                gamma_grad = grad_output * (
+                    (1 - gamma * ti[:, None]) * states_at_events
+                    + gamma * gamma_states_at_events
+                )
+
+        # Sort events by their node index while preserving temporal order
+        mi_sorted, idx = torch.sort(mi, stable=True)
+        mi_counts = torch.bincount(mi_sorted, minlength=M).tolist()
+
+        # Reorder ti, intensity, and alpha_states according to the sorted node indices
+        # Splitting yields per-node sequences (each subsequence remains time-ordered)
+        ti_split = torch.split(ti[:, idx, :], mi_counts, dim=1)  # Shape: [M, 1, Np, 1]
+        intensity_split = torch.split(
+            intensity[idx, None, None], mi_counts, dim=0
+        )  # Shape: [M, Np, 1, 1]
+        alpha_states_split = torch.split(
+            alpha_states[idx], mi_counts, dim=0
+        )  # Shape: [M, Np, M, K]
+
+        # From the -log(lambda) term: sum over (gamma * state / lambda)
+        alpha_intensity_state_sum = torch.stack(
+            [
+                (gamma * Kp / λp).sum(dim=0)
+                for (Kp, λp) in zip(alpha_states_split, intensity_split)
+            ],
+            dim=0,
+        )  # Shape: [M, M, K]
+
+        # From the integrated-intensity term: sum over (1 - e^{-γ (T - t_i)})
+        alpha_exp_decay_sum = torch.stack(
+            [-torch.expm1(-gamma * (T - tiq)).sum(dim=1) for tiq in ti_split],
+            dim=1,
+        )  # Shape: [M, K]
+
+        # --- Final gradient composition ---
+
+        # Gradient for mu: depends only on counts of reciprocals of intensities and T
+        mu_grad = grad_scale * torch.tensor(
+            [λp.reciprocal().sum() - T for λp in intensity_split], device=ti.device
+        )  # Shape: [M]
+
+        # Gradient for alpha: combine intensity term and integrated-intensity term,
+        # then permute to match alpha's shape [M, M, K]
+        alpha_grad = grad_scale * (
+            alpha_intensity_state_sum - alpha_exp_decay_sum
+        ).permute(2, 1, 0)
+
+        # Gradient for gamma if gamma is a parameter
+        if ctx.gamma_param:
+            gamma_grad = grad_scale * (gamma_state_sum - gamma_exp_decay_sum)
+        else:
+            gamma_grad = None
+
+        # Return gradients for (mu, alpha, gamma) and None for the remaining forwarded args
+        return (
+            mu_grad,
+            alpha_grad,
+            gamma_grad,
+        ) + (None,) * 8
+
+
 class HawkesNLL(torch.autograd.Function):
     """
     Custom autograd Function that computes the negative log-likelihood (NLL)
@@ -766,7 +1137,7 @@ class HawkesNLL(torch.autograd.Function):
         batch_start=0,
         batch_size=None,
     ):
-        N = ti.shape[1]
+        N = ti.shape[0]
         batch_size = batch_size or N
 
         # Accumulate the two terms of the NLL:
@@ -810,7 +1181,7 @@ class HawkesNLL(torch.autograd.Function):
             )
 
             # Store results in preallocated buffers
-            intensity[batch_start : (batch_start + Nb)] = batch_intensity.squeeze()
+            intensity[batch_start : (batch_start + Nb)] = batch_intensity
             states[batch_start : (batch_start + Nb)] = batch_states
 
             # Sum negative log intensities (the -log lambda term in NLL)
@@ -842,13 +1213,15 @@ class HawkesNLL(torch.autograd.Function):
             mi,
         ) = ctx.saved_tensors
         M, K, T = ctx.M, ctx.K, ctx.T
-        N = ti.shape[1]
+        N = ti.shape[0]
 
         # Scale applied to all computed parameter gradients (derivative of mean)
         grad_scale = -grad_output / N
 
         # dti: vector of inter-event times Δt_i = t_i - t_{i-1}; first Δt is 0
-        dti = ti - torch.cat([ti[:, 0:1, :], ti[:, 0:-1, :]], dim=1)  # Shape: [1, N, 1]
+        dti = ti - torch.cat([ti[0:1], ti[0:-1]])  # Shape: [N]
+        dti = dti[None, :, None]
+        ti = ti[None, :, None]
 
         # exp_decay is e^{-γ_k Δt_i} with shape [K, N, 1]
         exp_decay = torch.exp(-gamma * dti).permute(2, 1, 0)  # Shape: [K, N, 1]
@@ -918,7 +1291,6 @@ class HawkesNLL(torch.autograd.Function):
                 dim=(1, 2),
             )  # Shape: [K]
 
-        # --- Prepare data for alpha gradient computation per source node ---
         # Sort events by their node index while preserving temporal order
         mi_sorted, idx = torch.sort(mi, stable=True)
         mi_counts = torch.bincount(mi_sorted, minlength=M).tolist()
@@ -933,8 +1305,7 @@ class HawkesNLL(torch.autograd.Function):
             alpha_states[idx], mi_counts, dim=0
         )  # Shape: [M, Np, M, K]
 
-        # Compute components for alpha gradient:
-        #  - from the -log(lambda) term: sum over (gamma * state / lambda)
+        # From the -log(lambda) term: sum over (gamma * state / lambda)
         alpha_intensity_state_sum = torch.stack(
             [
                 (gamma * Kp / λp).sum(dim=0)
@@ -943,7 +1314,7 @@ class HawkesNLL(torch.autograd.Function):
             dim=0,
         )  # Shape: [M, M, K]
 
-        #  - from the integrated-intensity term: sum over (1 - e^{-γ (T - t_i)})
+        # From the integrated-intensity term: sum over (1 - e^{-γ (T - t_i)})
         alpha_exp_decay_sum = torch.stack(
             [-torch.expm1(-gamma * (T - tiq)).sum(dim=1) for tiq in ti_split],
             dim=1,

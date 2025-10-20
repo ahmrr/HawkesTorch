@@ -197,7 +197,7 @@ def plot_residuals(
         plt.plot(N, resid_hawkes, "r-", alpha=0.2)
 
         # Poisson model residuals
-        lam0 = ti_new.shape[1] / T
+        lam0 = ti_new.shape[0] / T
         N_poisson = lam0 * ts
         resid_poisson = N_poisson - N
         poisson_rmse = (resid_poisson**2).mean().sqrt().item()
