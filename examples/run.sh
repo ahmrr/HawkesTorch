@@ -1,7 +1,7 @@
 #!/bin/bash
 
 SIM_ARGS="--deterministic-sim --M 10 --N 10000 --T 1000000"
-FIT_ARGS="--model-type=low-rank --M 10 --N 10000 --T 1000000"
+FIT_ARGS="--model-type=full-rank" # --M 10 --N 10000 --T 1000000
 
 set -euo pipefail
 

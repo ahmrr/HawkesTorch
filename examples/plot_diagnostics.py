@@ -77,11 +77,11 @@ plotting.plot_diagnostic(
     output=args.diagnostic_plot,
 )
 logger.info(f"Saved diagnostic plot to {args.diagnostic_plot}")
-plotting.plot_residuals(
-    model=model_est,
-    model_sim=model_sim,
-    T=args.T,
-    max_events=args.N,
-    output=args.residual_plot,
-)
-logger.info(f"Saved residual plot to {args.residual_plot}")
+# plotting.plot_residuals(
+#     model=model_est,
+#     model_sim=model_sim,
+#     T=args.T,
+#     max_events=args.N,
+#     output=args.residual_plot,
+# )
+# logger.info(f"Saved residual plot to {args.residual_plot}")

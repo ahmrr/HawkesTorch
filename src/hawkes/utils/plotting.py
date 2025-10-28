@@ -3,15 +3,12 @@ import torch
 import statistics
 import matplotlib.pyplot as plt
 
-from hawkes import models
+from hawkes import models, utils
 
 
 def plot_intensity(
+    seq: utils.EventSequence,
     model_sim: models.HawkesBase,
-    ti: torch.Tensor,
-    mi: torch.Tensor,
-    T: float = None,
-    M: int = None,
     grid: int = 1000,
     output: str = "intensity_plot.png",
     plot_events: bool = True,
@@ -30,26 +27,26 @@ def plot_intensity(
         plot_events: Whether to mark the location of events on the plot
     """
 
-    if T is None:
-        T = ti[-1]
-    if M is None:
-        M = model_sim.M
+    assert (
+        seq.M == model_sim.M
+    ), "error: event sequence and sim model have different number of nodes"
 
-    t = torch.linspace(0, T, grid, device=ti.device)
+    t = torch.linspace(0, seq.T, grid, device=seq.ti.device)
     with torch.no_grad():
-        intensity, R = model_sim.intensity_at_events(ti, mi, return_states=True)
-        t_intensity = model_sim.intensity_at_t(t, ti.squeeze(), mi, R).cpu()
+        intensity, intensity_states = model_sim.intensity_at_events(
+            seq, return_all_states=True
+        )
+        t_intensity = model_sim.intensity_at_t(t, seq, intensity_states).cpu()
 
     t = t.cpu()
-    ti = ti.cpu()
-    mi = mi.cpu()
+    seq = seq.to("cpu")
     intensity = intensity.cpu()
 
-    fig, ax = plt.subplots(M, 1, figsize=(9, M), sharex=True, sharey=False)
+    fig, ax = plt.subplots(seq.M, 1, figsize=(9, seq.M), sharex=True, sharey=False)
 
-    for g in range(M):
-        mask = mi.squeeze() == g
-        times_g = ti.squeeze()[mask]
+    for g in range(seq.M):
+        mask = seq.mi.squeeze() == g
+        times_g = seq.ti.squeeze()[mask]
 
         if plot_events:
             for eventt in times_g:
@@ -57,14 +54,14 @@ def plot_intensity(
 
         ax[g].plot(t.squeeze(), t_intensity[:, g], label=f"Account {g}", linewidth=1)
         # ax[g].plot(times_g, intensity[mask, g], ".")  # Experimental: plot event points
-        ax[g].set_xlim(0, T)
+        ax[g].set_xlim(0, seq.T)
         ax[g].set_ylim(0, torch.ceil(torch.max(intensity)))
 
         if g > 0:
             ax[g].set_yticklabels([])
             ax[g].set_yticks([])
 
-        if g == M - 1:
+        if g == seq.M - 1:
             ax[g].set_xlabel("Time (arbitrary)")
 
         label = f"Account {g}" if g == 0 else g
@@ -163,6 +160,8 @@ def plot_residuals(
         T: End time of event sequence observation period
         max_events: The maximum number of events to consider in the residual plot
         num_simulations: number of simulation rounds to perform; i.e., number of calculated residual curves
+
+    [DOES NOT WORK]
     """
 
     # TODO: too much memory is used for plotting residuals
@@ -174,21 +173,20 @@ def plot_residuals(
     poisson_rmse_list = []
 
     for i in range(num_simulations):
-        ti_new, mi_new = model_sim.simulate(T, max_events=max_events)
+        seq_new = model_sim.simulate(T, max_events=max_events)
         ts = torch.linspace(2, T, 100)
         EN, N = [], []
 
         for t in ts:
             with torch.no_grad():
-                EN_t = model.integrated_intensity(t, ti_new, mi_new)
+                EN_t = model.integrated_intensity(t, seq_new.ti, seq_new.mi)
                 EN.append(EN_t)
-            N.append((ti_new < t).sum().item())
+            N.append((seq_new.ti < t).sum().item())
 
         EN = torch.stack(EN).cpu()
         N = torch.tensor(N)
 
-        ti_new = ti_new.cpu()
-        mi_new = mi_new.cpu()
+        seq_new.cpu()
 
         # Hawkes model residuals
         resid_hawkes = EN - N
@@ -197,7 +195,7 @@ def plot_residuals(
         plt.plot(N, resid_hawkes, "r-", alpha=0.2)
 
         # Poisson model residuals
-        lam0 = ti_new.shape[1] / T
+        lam0 = seq_new.N / T
         N_poisson = lam0 * ts
         resid_poisson = N_poisson - N
         poisson_rmse = (resid_poisson**2).mean().sqrt().item()
