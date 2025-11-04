@@ -87,7 +87,7 @@ fit_config = config.HawkesFitConfig(
     l1_hinge=0.05,
     nuc_penalty=0,
 )
-est_gamma = np.linspace(0.1, 5, 5).tolist()
+est_gamma = [0.1] * 3
 est_init_scale = 0.01
 est_rank = 3
 
@@ -102,6 +102,7 @@ match args.model_type:
             debug_config=config.HawkesDebugConfig(
                 check_grad_epsilon=False,
                 use_autograd_gradients=False,
+                profile_mem_iters=4000,
             ),
         ).to(args.device)
     case "low-rank":

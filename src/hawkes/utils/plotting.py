@@ -31,7 +31,7 @@ def plot_intensity(
         seq.M == model_sim.M
     ), "error: event sequence and sim model have different number of nodes"
 
-    t = torch.linspace(0, seq.T, grid, device=seq.ti.device)
+    t = torch.linspace(0, seq.ti.max(), grid, device=seq.ti.device)
     with torch.no_grad():
         intensity, intensity_states = model_sim.intensity_at_events(
             seq, return_all_states=True
@@ -54,7 +54,7 @@ def plot_intensity(
 
         ax[g].plot(t.squeeze(), t_intensity[:, g], label=f"Account {g}", linewidth=1)
         # ax[g].plot(times_g, intensity[mask, g], ".")  # Experimental: plot event points
-        ax[g].set_xlim(0, seq.T)
+        ax[g].set_xlim(0, seq.ti.max())
         ax[g].set_ylim(0, torch.ceil(torch.max(intensity)))
 
         if g > 0:
