@@ -1,9 +1,14 @@
+# import os
+
+# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+# os.environ["TORCH_USE_CUDA_DSA"] = "1"
+
 import torch
 import logging
 import argparse
 import numpy as np
 
-from hawkes import models
+from hawkes import models, utils
 from hawkes.utils import config, plotting
 
 # Setup logging and argument parsing
@@ -18,24 +23,24 @@ logger = logging.getLogger(__name__)
 parser = argparse.ArgumentParser(
     description="Run Hawkes process simulation and estimation"
 )
-parser.add_argument(
-    "--T",
-    type=int,
-    default=500,
-    help="Set maximum simulated event time (default: T = 500)",
-)
-parser.add_argument(
-    "--N",
-    type=int,
-    default=2000,
-    help="Set number of simulated events (default: N = 2000)",
-)
-parser.add_argument(
-    "--M",
-    type=int,
-    default=10,
-    help="Set number of event types (default: M = 10)",
-)
+# parser.add_argument(
+#     "--T",
+#     type=int,
+#     default=500,
+#     help="Set maximum simulated event time (default: T = 500)",
+# )
+# parser.add_argument(
+#     "--N",
+#     type=int,
+#     default=2000,
+#     help="Set number of simulated events (default: N = 2000)",
+# )
+# parser.add_argument(
+#     "--M",
+#     type=int,
+#     default=10,
+#     help="Set number of event types (default: M = 10)",
+# )
 parser.add_argument(
     "--batch-size",
     type=int,
@@ -70,7 +75,7 @@ parser.add_argument(
 args = parser.parse_args()
 
 # Obtain event sequence and reference interaction matrix
-ti, mi = torch.load(args.events_file, weights_only=True)
+seq = torch.load(args.events_file, weights_only=False)
 
 # Fitting hyperparameters
 fit_config = config.HawkesFitConfig(
@@ -82,7 +87,7 @@ fit_config = config.HawkesFitConfig(
     l1_hinge=0.05,
     nuc_penalty=0,
 )
-est_gamma = np.linspace(0.1, 5, 5).tolist()
+est_gamma = [0.1] * 3
 est_init_scale = 0.01
 est_rank = 3
 
@@ -90,33 +95,42 @@ est_rank = 3
 match args.model_type:
     case "full-rank":
         model_est = models.HawkesFullRank(
-            M=args.M,
+            M=seq.M,
             gamma=torch.tensor(est_gamma).to(args.device),
             init_scale=est_init_scale,
             gamma_param=True,
-            # debug_config=config.HawkesDebugConfig(check_grad_epsilon=True),
+            debug_config=config.HawkesDebugConfig(
+                check_grad_epsilon=False,
+                use_autograd_gradients=False,
+                profile_mem_iters=4000,
+            ),
         ).to(args.device)
     case "low-rank":
         model_est = models.HawkesLowRank(
-            M=args.M,
+            M=seq.M,
             gamma=torch.tensor(est_gamma).to(args.device),
             rank=est_rank,
             init_scale=est_init_scale,
             gamma_param=True,
-            # debug_config=config.HawkesDebugConfig(check_grad_epsilon=True),
+            debug_config=config.HawkesDebugConfig(
+                check_grad_epsilon=False,
+                use_autograd_gradients=False,
+            ),
         ).to(args.device)
     case "upper-triangular":
         model_est = models.HawkesUpperTriangular(
-            M=args.M,
+            M=seq.M,
             gamma=torch.tensor(est_gamma).to(args.device),
             rank=est_rank,
             init_scale=est_init_scale,
             gamma_param=True,
+            debug_config=config.HawkesDebugConfig(
+                check_grad_epsilon=False,
+                use_autograd_gradients=False,
+            ),
         ).to(args.device)
 
-_ = model_est.fit(
-    args.T, ti, mi, fit_config
-)  # Use a large number to capture all events
+_ = model_est.fit(seq, fit_config)
 
 # Save estimated model
 torch.save(model_est, args.model_est_file)
