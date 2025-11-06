@@ -175,7 +175,7 @@ class HawkesBase(torch.nn.Module, ABC):
             List of scalar loss values (training loss per epoch).
         """
 
-        assert seq.M <= self.M, f"sequence M is {seq.M} but model M is {self.M}" 
+        assert seq.M <= self.M, f"sequence M is {seq.M} but model M is {self.M}"
 
         if self.debug_config.detect_anomalies:
             torch.autograd.set_detect_anomaly(True)
@@ -592,10 +592,10 @@ class HawkesBase(torch.nn.Module, ABC):
 
         # Return assembled results according to requested flags
         res = (λ,)
-        if return_last_state:
-            res += (P[:, -1, :],)  # last prefix for next batch continuity
         if return_all_states:
             res += (states,)
+        if return_last_state:
+            res += (P[:, -1, :],)  # last prefix for next batch continuity
 
         return res if len(res) > 1 else res[0]
 

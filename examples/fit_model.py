@@ -99,11 +99,6 @@ match args.model_type:
             gamma=torch.tensor(est_gamma).to(args.device),
             init_scale=est_init_scale,
             gamma_param=True,
-            debug_config=config.HawkesDebugConfig(
-                check_grad_epsilon=False,
-                use_autograd_gradients=False,
-                profile_mem_iters=4000,
-            ),
         ).to(args.device)
     case "low-rank":
         model_est = models.HawkesLowRank(
@@ -112,10 +107,6 @@ match args.model_type:
             rank=est_rank,
             init_scale=est_init_scale,
             gamma_param=True,
-            debug_config=config.HawkesDebugConfig(
-                check_grad_epsilon=False,
-                use_autograd_gradients=False,
-            ),
         ).to(args.device)
     case "upper-triangular":
         model_est = models.HawkesUpperTriangular(
@@ -124,10 +115,6 @@ match args.model_type:
             rank=est_rank,
             init_scale=est_init_scale,
             gamma_param=True,
-            debug_config=config.HawkesDebugConfig(
-                check_grad_epsilon=False,
-                use_autograd_gradients=False,
-            ),
         ).to(args.device)
 
 _ = model_est.fit(seq, fit_config)

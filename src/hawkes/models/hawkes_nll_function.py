@@ -28,7 +28,7 @@ class HawkesLogSumIntensity(torch.autograd.Function):
         nll_logsum_term = 0.0
 
         intensity_at_events = torch.empty(seq.N, device=seq.ti.device)
-        intensity_states = torch.empty(seq.N, seq.M, K, device=seq.ti.device)
+        intensity_states_at_events = torch.empty(seq.N, 1, K, device=seq.ti.device)
 
         prev_state = None
         for bs in range(0, seq.N, batch_size):
@@ -37,8 +37,8 @@ class HawkesLogSumIntensity(torch.autograd.Function):
             # TODO: Saving all states for backward is memory intensive
             (
                 batch_intensity,
-                batch_prev_state,
                 batch_states,
+                prev_state,
             ) = intensity_at_events_fun(
                 seq,
                 batch_prev_state=prev_state,
@@ -50,7 +50,9 @@ class HawkesLogSumIntensity(torch.autograd.Function):
             )
 
             intensity_at_events[bs:be] = batch_intensity
-            intensity_states[bs:be] = batch_states
+            intensity_states_at_events[bs:be] = torch.gather(
+                batch_states, dim=1, index=seq.mi[bs:be, None, None].expand(-1, 1, K)
+            )
 
             # Sum log intensities (the log lambda term in NLL)
             nll_logsum_term += torch.sum(torch.log(batch_intensity))
@@ -66,7 +68,7 @@ class HawkesLogSumIntensity(torch.autograd.Function):
             alpha,
             gamma,
             intensity_at_events,
-            intensity_states if gamma_param else None,
+            intensity_states_at_events if gamma_param else None,
         )
 
         return nll_logsum_term
@@ -80,7 +82,7 @@ class HawkesLogSumIntensity(torch.autograd.Function):
             alpha,
             gamma,
             intensity_at_events,
-            intensity_states,
+            intensity_states_at_events,
         ) = ctx.saved_tensors
         K = gamma.shape[0]
 
@@ -106,8 +108,8 @@ class HawkesLogSumIntensity(torch.autograd.Function):
                     seq,
                     alpha,
                     gamma,
-                    intensity_states,
                     intensity_at_events,
+                    intensity_states_at_events,
                     gamma_prev_state,
                     bs,
                     be,
@@ -213,8 +215,8 @@ def _compute_gamma_grad(
     seq: utils.EventSequence,
     alpha: torch.Tensor,
     gamma: torch.Tensor,
-    intensity_states: torch.Tensor,
     intensity_at_events: torch.Tensor,
+    intensity_states_at_events: torch.Tensor,
     gamma_prev_state: torch.Tensor,
     batch_start: int,
     batch_end: int,
@@ -227,26 +229,40 @@ def _compute_gamma_grad(
 
     ti_b, mi_b = seq.ti[bs:be], seq.mi[bs:be]  # Shape: [Nb]
     intensity_b = intensity_at_events[bs:be]  # Shape: [Nb]
-    intensity_states_b = intensity_states[bs:be]  # Shape: [Nb, M, K]
+    intensity_states_b = intensity_states_at_events[bs:be]  # Shape: [Nb, 1, K]
 
-    intensity_states_at_events = torch.gather(
-        intensity_states[bs:be], dim=1, index=seq.mi[bs:be, None, None].expand(-1, 1, K)
-    )  # Shape: [Nb, 1, K]
-
-    # Δt_i of shape [1, Nb, 1]
-    dti = seq.ti[bs:be] - (
+    # t_{i - 1} of shape [1, Nb, 1]
+    ti1 = (
         torch.cat([seq.ti[0:1], seq.ti[0 : (be - 1)]])
         if bs == 0
         else seq.ti[(bs - 1) : (be - 1)]
     )
+
+    # Δt_i of shape [1, Nb, 1]
+    dti = ti_b - ti1
+
+    ti1 = ti1[None, :, None]
     dti = dti[None, :, None]
+
+    # α_{m_{i-1}} of shape [K, Nb, M]
+    alpha_mi = (
+        torch.cat(
+            [
+                torch.zeros_like(alpha[:, 0:1, :]),
+                alpha[:, seq.mi[0 : (be - 1)], :],
+            ],
+            dim=1,
+        )
+        if bs == 0
+        else alpha[:, seq.mi[(bs - 1) : (be - 1)], :]
+    )
 
     # e^{-γ_k Δt_i}
     exp_dti = torch.exp(-gamma * dti).permute(2, 1, 0)  # Shape: [K, Nb, 1]
 
     # Build analogous transition matrices for d/dγ terms.
     M_gamma = torch.cat(
-        [exp_dti, -dti * intensity_states_b.permute(2, 0, 1)], dim=2
+        [exp_dti, exp_dti * ti1 * alpha_mi], dim=2
     )  # Shape: [K, Nb, M+1]
     if gamma_prev_state is not None:
         M_gamma = torch.cat([gamma_prev_state[:, None, :], M_gamma], dim=1)
@@ -263,11 +279,11 @@ def _compute_gamma_grad(
 
     # Compose the term required for gamma gradient from log-sum contribution
     gamma_grad_terms = (
-        intensity_states_at_events + gamma * gamma_states_at_events
+        gamma * gamma_states_at_events
+        + (1 - gamma * ti_b[:, None, None]) * intensity_states_b
     )  # Shape: [Nb, 1, K]
     gamma_grad = torch.sum(
-        gamma_grad_terms.squeeze(1) / intensity_b.unsqueeze(-1),
-        dim=0,
+        gamma_grad_terms.squeeze(1) / intensity_b.unsqueeze(-1), dim=0
     )  # Shape: [K]
 
     # Integral term gamma derivative (unused)
