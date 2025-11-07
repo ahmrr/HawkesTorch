@@ -193,6 +193,7 @@ class HawkesBase(torch.nn.Module, ABC):
 
         optimizer = torch.optim.Adam(self.parameters(), lr=fit_config.learning_rate)
         losses = []
+        epoch_times = []
 
         if self.debug_config.profile_mem_iters:
             torch.cuda.memory._record_memory_history(max_entries=100000)
@@ -202,10 +203,14 @@ class HawkesBase(torch.nn.Module, ABC):
 
         self.logger.info("Starting training loop...")
 
+        if self.device != "cpu":
+            torch.cuda.reset_peak_memory_stats()
+
         fit_time_real = time.perf_counter()
-        torch.cuda.reset_peak_memory_stats()
 
         for epoch in range(fit_config.num_steps):
+            epoch_time_real = time.perf_counter()
+
             optimizer.zero_grad()
 
             # Compute NLL (forward + backward handled by custom Function)
@@ -258,9 +263,13 @@ class HawkesBase(torch.nn.Module, ABC):
                 )
 
             optimizer.step()
-            losses.append(loss.item())
 
-            if epoch >= self.debug_config.profile_mem_iters:
+            epoch_time_real = time.perf_counter() - epoch_time_real
+
+            losses.append(loss.item())
+            epoch_times.append(epoch_time_real)
+
+            if epoch >= self.debug_config.profile_mem_iters and self.device != "cpu":
                 torch.cuda.memory._record_memory_history(enabled=None)
 
             # Periodic logging with more diagnostics
@@ -302,14 +311,14 @@ class HawkesBase(torch.nn.Module, ABC):
         peak_mem_gpu = torch.cuda.max_memory_allocated()
         fit_time_real = time.perf_counter() - fit_time_real
 
-        if self.debug_config.profile_mem_iters:
+        if self.debug_config.profile_mem_iters and self.device != "cpu":
             mem_file = f"outputs/mem/mem_snapshot_n{seq.N}_m{self.M}_b{fit_config.batch_size}_e{self.debug_config.profile_mem_iters}.pkl"
             torch.cuda.memory._dump_snapshot(mem_file)
             self.logger.info(f"Saved memory profiling snapshot at {mem_file}")
 
         self.logger.info("Training completed successfully!")
 
-        # Final summary statistics computed without gradient tracking
+        # Final summary statistics
         with torch.no_grad():
             final_sparsity = (
                 self.alpha.isclose(torch.zeros_like(self.alpha), atol=0.03).sum()
@@ -324,11 +333,17 @@ class HawkesBase(torch.nn.Module, ABC):
             f"Final sparsity={final_sparsity:.3f}"
         )
         self.logger.info(
-            f"Performance summary: Fitting took {time.strftime('%H:%M:%S', time.gmtime(fit_time_real))}, "
-            f"Peak GPU memory usage was {round(peak_mem_gpu / 2**20)}MiB"
+            f"Performance summary: Fitting time={time.strftime('%H:%M:%S', time.gmtime(fit_time_real))}, "
+            f"Average epoch time={sum(epoch_times) / len(epoch_times) * 1000:.3f}ms, "
+            f"Peak memory={round(peak_mem_gpu / 2**20)}MiB"
         )
 
-        return losses
+        return {
+            "losses": losses,
+            "epoch_times": epoch_times,
+            "peak_mem_gpu": peak_mem_gpu,
+            "fit_time_real": fit_time_real,
+        }
 
     def nll(
         self,

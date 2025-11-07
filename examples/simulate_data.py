@@ -112,7 +112,7 @@ model_sim = models.HawkesFullRank(
 # Set base excitation and interaction rates according to fixed sim params
 model_sim.mu = torch.tensor(sim_mu).to(args.device)
 model_sim.alpha = (
-    torch.tensor(sim_alpha).to(args.device).unsqueeze(0).repeat(1, 1, sim_K)
+    torch.tensor(sim_alpha).to(args.device).unsqueeze(0).repeat(sim_K, 1, 1)
 )
 
 # Simulate the event sequence and save intensity plot
