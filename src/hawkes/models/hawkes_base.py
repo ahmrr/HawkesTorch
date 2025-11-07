@@ -154,9 +154,11 @@ class HawkesBase(torch.nn.Module, ABC):
                     # Choose event type proportional to λ_t
                     p = λ_t / λ_star_new
                     # use logits to avoid floating point rounding issues
-                    event_type = torch.distributions.Categorical(
-                        logits=torch.log(p)
-                    ).sample()
+                    event_type = (
+                        torch.distributions.Categorical(logits=torch.log(p))
+                        .sample()
+                        .unsqueeze(0)
+                    )
                     mi = torch.cat([mi, event_type])
                     ti = torch.cat([ti, torch.tensor([t], device=self.device)])
                     R_λ = R  # update right-limit state
@@ -512,12 +514,12 @@ class HawkesBase(torch.nn.Module, ABC):
             else torch.zeros(self.K, self.M, device=self.device)
         )  # Shape: [K, M]
 
-        exp_decay = torch.exp(-self.gamma.unsqueeze(-1) * dti)  # Shape: [K, 1]
+        exp_decay = torch.exp(-self.gamma[:, None] * dti)  # Shape: [K, 1]
 
         # R = γ-decayed previous state + γ-decayed new impulse from last event
         R = exp_decay * prev_state + exp_decay * alphas  # Shape: [K, M]
 
-        λ = self.mu + torch.sum(self.gamma * R, dim=0).unsqueeze(0)
+        λ = self.mu + torch.sum(self.gamma[:, None] * R, dim=0)
 
         if return_next_state:
             return λ, R  # λ shape: [1, M], R shape: [K, M]
