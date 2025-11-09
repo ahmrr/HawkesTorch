@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 
 from .. import utils
 from ..utils import config, _torch_scan
-from .hawkes_nll_function import HawkesLogSumIntensity
+from .hawkes_nll_function import HawkesLogSumIntensity, HawkesIntegratedExcitation
 
 
 class HawkesBase(torch.nn.Module, ABC):
@@ -58,7 +58,9 @@ class HawkesBase(torch.nn.Module, ABC):
         state_dict = super().state_dict(*args, **kwargs)
         # alpha may be a derived tensor in some subclasses; store its current value
         with torch.no_grad():
+            state_dict["mu"] = self.mu.detach()
             state_dict["alpha"] = self.alpha.detach()
+            state_dict["gamma"] = self.gamma.detach()
         return state_dict
 
     def load_state_dict(self, state_dict, *args, **kwargs):
@@ -250,8 +252,6 @@ class HawkesBase(torch.nn.Module, ABC):
 
             # Ensure gradients are finite
             for n, p in self.named_parameters():
-                # DEBUG
-                # print(f"Gradient of {n} is: {p.grad}")
                 if torch.isnan(p.grad).any():
                     self.logger.error(f"Gradient of {n} is nan at epoch {epoch + 1}")
                     self.logger.info(p.grad)
@@ -289,7 +289,8 @@ class HawkesBase(torch.nn.Module, ABC):
                         f"Loss={full_nll.item():.4f}, "
                         f"Sparsity={sparsity_factor:.3f}, "
                         f"μ_mean={self.mu.mean().item():.4f}, "
-                        f"α_mean={self.alpha.mean().item():.4f}"
+                        f"α_mean={self.alpha.mean().item():.4f}, "
+                        f"γ_mean={self.gamma.mean().item():.4f}"
                     )
 
                 # Checking manual gradients against autograd
@@ -353,7 +354,7 @@ class HawkesBase(torch.nn.Module, ABC):
         batch_size: int | None = None,
     ):
         gamma_param = any([("gamma" in n) for n, _ in self.named_parameters()])
-        batch_size = batch_size or seq.N
+        batch_size = min(batch_size or seq.N, seq.N)
 
         # TODO: Support arbitrary mu parameterization by passing in base rate at each event
         mu_at_events = self.mu[seq.mi]
@@ -369,7 +370,7 @@ class HawkesBase(torch.nn.Module, ABC):
             batch_size,
         )
 
-        nll_integral_term = self.integrated_intensity(seq)
+        nll_integral_term = self.integrated_intensity(seq, batch_size=batch_size)
 
         return -(nll_logsum_term - nll_integral_term) / seq.N
 
@@ -395,7 +396,7 @@ class HawkesBase(torch.nn.Module, ABC):
             Scalar NLL (sum of -log-intensity at events and integrated intensity).
         """
 
-        batch_size = batch_size or seq.N
+        batch_size = min(batch_size or seq.N, seq.N)
 
         nll_neg_logsum = 0.0
         nll_integral = 0.0
@@ -429,45 +430,49 @@ class HawkesBase(torch.nn.Module, ABC):
 
         return nll_neg_logsum + nll_integral
 
+    def integrated_base_rate(self, seq: utils.EventSequence) -> torch.Tensor:
+        """
+        Compute the integrated base rate over the observation interval [0, T].
+        """
+
+        # TODO: generalize to arbitrary base rate parametrization
+        return seq.T * torch.sum(self.mu)
+
+    def integrated_excitation(
+        self,
+        seq: utils.EventSequence,
+        batch_size: int | None = None,
+    ) -> torch.Tensor:
+        """
+        Wrapper for computing the integrated excitation over the observation interval [0, T].
+        """
+
+        gamma_param = any([("gamma" in n) for n, _ in self.named_parameters()])
+        batch_size = min(batch_size or seq.N, seq.N)
+
+        return HawkesIntegratedExcitation.apply(
+            seq,
+            self.alpha,
+            self.gamma,
+            gamma_param,
+            batch_size,
+        )
+
     def integrated_intensity(
         self,
         seq: utils.EventSequence,
-        batch_size=None,
+        batch_size: int | None = None,
     ) -> torch.Tensor:
         """
-        Compute the integrated intensity over the observation interval [0, T].
-
-        When batching is enabled, this returns either the full integral for the
-        first batch (including mu * T) or only the excitation contribution for
-        subsequent batches to avoid double-counting mu * T.
+        Compute the total integrated intensity over the observation interval [0, T].
         """
 
-        # TODO: batching right now is useless because computation graph is still being stored
+        batch_size = min(batch_size or seq.N, seq.N)
 
-        batch_size = batch_size or seq.N
+        base_rate_integral = self.integrated_base_rate(seq)
+        excitation_integral = self.integrated_excitation(seq, batch_size=batch_size)
 
-        # Initialize with base rate integral
-        # TODO: generalize to arbitrary base rate parametrization
-        intensity_integral = seq.T * torch.sum(self.mu)
-
-        for bs in range(0, seq.N, batch_size):
-            be = min(bs + batch_size, seq.N)
-
-            ti_b, mi_b = seq.ti[bs:be], seq.mi[bs:be]
-
-            mask = ti_b < seq.T
-            ti_b, mi_b = ti_b[mask], mi_b[mask]
-
-            # Select alpha entries corresponding to the events and align dims
-            alphas = self.alpha[:, mi_b, :].permute(1, 2, 0)[None]
-            ti_b = ti_b[None, :, None, None]
-
-            # Excitation contribution: sum_k sum_events α * (1 - e^{-γ_k (T - t_i)})
-            intensity_integral += torch.sum(
-                alphas * (1 - torch.exp(-self.gamma * (seq.T - ti_b)))
-            )
-
-        return intensity_integral
+        return base_rate_integral + excitation_integral
 
     def intensity_at_next_event(
         self,
@@ -498,6 +503,8 @@ class HawkesBase(torch.nn.Module, ABC):
             If return_next_state is False: λ (1, M) vector of intensities at time t
             If return_next_state is True: tuple (λ (1, M), R (K, M)) where R is next state
         """
+
+        # TODO: Fix calling convention
 
         N = ti.shape[0]
 
