@@ -179,11 +179,19 @@ def _compute_alpha_grad(
 
     # Transition matrices for the alpha-state recurrence
     M_alpha = torch.cat([exp_dti, exp_dti * e_mi], dim=2)  # Shape: [K, Nb, M+1]
+    # if alpha_prev_state is not None:
+    #     M_alpha = torch.cat([alpha_prev_state[:, None, :], M_alpha], dim=1)
     if alpha_prev_state is not None:
-        M_alpha = torch.cat([alpha_prev_state[:, None, :], M_alpha], dim=1)
+        M_alpha[:, 0:1, :] = _torch_scan.state_left_mult(
+            alpha_prev_state[:, None, :], M_alpha[:, 0:1, :]
+        )  # Shape: [K, Nb+1, M+1]
 
     # Prefix scan to get cumulative products of transition matrices
     P_alpha = _torch_scan.prefix_scan(M_alpha, _torch_scan.state_left_mult, dim=1)
+    # if alpha_prev_state is not None:
+    #     P_alpha = _torch_scan.state_left_mult(
+    #         alpha_prev_state[:, None, :], P_alpha
+    #     )  # Shape: [K, Nb, M+1]
 
     alpha_states = P_alpha[:, -Nb:, 1:].permute(1, 2, 0)
     alpha_prev_state = P_alpha[:, -1, :]
@@ -274,10 +282,18 @@ def _compute_gamma_grad(
     M_gamma = torch.cat(
         [exp_dti, exp_dti * ti1 * alpha_mi], dim=2
     )  # Shape: [K, Nb, M+1]
+    # if gamma_prev_state is not None:
+    #     M_gamma = torch.cat([gamma_prev_state[:, None, :], M_gamma], dim=1)
     if gamma_prev_state is not None:
-        M_gamma = torch.cat([gamma_prev_state[:, None, :], M_gamma], dim=1)
+        M_gamma[:, 0:1, :] = _torch_scan.state_left_mult(
+            gamma_prev_state[:, None, :], M_gamma[:, 0:1, :]
+        )  # Shape: [K, Nb+1, M+1]
 
     P_gamma = _torch_scan.prefix_scan(M_gamma, _torch_scan.state_left_mult, dim=1)
+    # if gamma_prev_state is not None:
+    #     P_gamma = _torch_scan.state_left_mult(
+    #         gamma_prev_state[:, None, :], P_gamma
+    #     )  # Shape: [K, Nb, M+1]
 
     gamma_states = P_gamma[:, -Nb:, 1:].permute(1, 2, 0)
     gamma_prev_state = P_gamma[:, -1, :]

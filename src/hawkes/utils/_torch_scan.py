@@ -6,6 +6,8 @@ from typing import Callable
 
 PREFIX_SCAN_IMPLEMENTATION = "BL"
 
+# TODO: Pad outside of scan function instead of repeatedly inside
+
 
 def state_left_mult(B: torch.Tensor, A: torch.Tensor):
     """Left-multiply operation for compressed transition matrices"""

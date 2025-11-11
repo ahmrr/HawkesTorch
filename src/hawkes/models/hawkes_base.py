@@ -596,12 +596,20 @@ class HawkesBase(torch.nn.Module, ABC):
 
         # Build transition matrices for each time step: [exp_decay, exp_decay * alphas]
         M = torch.cat([exp_dti, exp_dti * alpha_mi], dim=2)  # Shape: [K, Nb, M+1]
+        # if batch_prev_state is not None:
+        #     M = torch.cat([batch_prev_state[:, None, :], M], dim=1)
         if batch_prev_state is not None:
-            M = torch.cat([batch_prev_state[:, None, :], M], dim=1)
+            M[:, 0:1, :] = _torch_scan.state_left_mult(
+                batch_prev_state[:, None, :], M[:, 0:1, :]
+            )  # Shape: [K, Nb+1, M+1]
 
         # Compute prefix products P via scan; P contains augmented states
-        # Shape: [K, Nb-1, M+1] (first batch) or [K, Nb+1, M+1] (regular batch)
+        # Shape: [K, Nb, M+1] (first batch) or [K, Nb+1, M+1] (regular batch)
         P = _torch_scan.prefix_scan(M, _torch_scan.state_left_mult, dim=1)
+        # if batch_prev_state is not None:
+        #     P = _torch_scan.state_left_mult(
+        #         batch_prev_state[:, None, :], P
+        #     )  # Shape: [K, Nb, M+1]
 
         # Extract non-augmented right-limit states R for the last Nb prefixes
         states = P[:, -Nb:, 1:].permute(1, 2, 0)  # Shape: [Nb, M, K]
