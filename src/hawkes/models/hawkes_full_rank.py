@@ -41,51 +41,51 @@ class HawkesFullRank(HawkesBase):
             debug_config=debug_config,
         )
 
-        self.trans = transformation
+        self.t = transformation
 
         if gamma_param:
             self._inv_gamma = torch.nn.Parameter(
-                (self.trans.inverse(gamma)).to(self.device)
+                (self.t.inverse(gamma)).to(self.device)
             )
         else:
-            self._inv_gamma = self.trans.inverse(gamma)
+            self._inv_gamma = self.t.inverse(gamma)
 
         self.init_scale = torch.tensor([init_scale])
 
         # Initialize low-rank parameters
         self._inv_mu = torch.nn.Parameter(
-            (self.trans.inverse(self.init_scale) * torch.ones(M)).to(self.device)
+            (self.t.inverse(self.init_scale) * torch.ones(M)).to(self.device)
         )
         self._inv_alpha = torch.nn.Parameter(
-            (
-                self.trans.inverse(self.init_scale) * torch.ones(self.K, self.M, self.M)
-            ).to(self.device)
+            (self.t.inverse(self.init_scale) * torch.ones(self.K, self.M, self.M)).to(
+                self.device
+            )
         )
 
     @property
     def mu(self) -> torch.Tensor:
-        return self.trans.forward(self._inv_mu)
+        return self.t.forward(self._inv_mu)
 
     @mu.setter
     def mu(self, value: torch.Tensor | float):
-        self._inv_mu.data = self.trans.inverse(
+        self._inv_mu.data = self.t.inverse(
             value * torch.ones_like(self._inv_mu).data.clone()
         )
 
     @property
     def alpha(self) -> torch.Tensor:
-        return self.trans.forward(self._inv_alpha)
+        return self.t.forward(self._inv_alpha)
 
     @alpha.setter
     def alpha(self, value: torch.Tensor | float):
-        self._inv_alpha.data = self.trans.inverse(
+        self._inv_alpha.data = self.t.inverse(
             value * torch.ones_like(self._inv_alpha).data.clone()
         )
 
     @property
     def gamma(self) -> torch.Tensor:
-        return self.trans.forward(self._inv_gamma)
+        return self.t.forward(self._inv_gamma)
 
     @gamma.setter
     def gamma(self, value: torch.Tensor):
-        self._inv_gamma.data = self.trans.inverse(value)
+        self._inv_gamma.data = self.t.inverse(value)

@@ -181,6 +181,10 @@ class HawkesBase(torch.nn.Module, ABC):
 
         assert seq.M <= self.M, f"sequence M is {seq.M} but model M is {self.M}"
 
+        # Round batch size up to nearest power of 2
+        fit_config.batch_size = min(fit_config.batch_size or seq.N, seq.N)
+        fit_config.batch_size = 2 ** math.ceil(math.log2(fit_config.batch_size))
+
         if self.debug_config.detect_anomalies:
             torch.autograd.set_detect_anomaly(True)
 

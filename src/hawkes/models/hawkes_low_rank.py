@@ -38,43 +38,39 @@ class HawkesLowRank(HawkesBase):
 
         super().__init__(M, K, device=self.device, debug_config=debug_config)
 
-        self.trans = transformation
+        self.t = transformation
 
         if gamma_param:
             self._inv_gamma = torch.nn.Parameter(
-                (self.trans.inverse(gamma)).to(self.device)
+                (self.t.inverse(gamma)).to(self.device)
             )
         else:
-            self._inv_gamma = self.trans.inverse(gamma)
+            self._inv_gamma = self.t.inverse(gamma)
 
         self.rank = rank
         self.init_scale = torch.tensor([init_scale])
 
         # Initialize low-rank parameters
         self._inv_mu = torch.nn.Parameter(
-            (self.trans.inverse(self.init_scale) * torch.ones(M)).to(self.device)
+            (self.t.inverse(self.init_scale) * torch.ones(M)).to(self.device)
         )
         self._inv_alpha_diag = torch.nn.Parameter(
-            (self.trans.inverse(self.init_scale) * torch.ones(K, M)).to(self.device)
+            (self.t.inverse(self.init_scale) * torch.ones(K, M)).to(self.device)
         )  # Diagonal of alpha
         self._inv_U = torch.nn.Parameter(
-            (self.trans.inverse(self.init_scale) * torch.ones(K, M, rank)).to(
-                self.device
-            )
+            (self.t.inverse(self.init_scale) * torch.ones(K, M, rank)).to(self.device)
         )
         self._inv_V = torch.nn.Parameter(
-            (self.trans.inverse(self.init_scale) * torch.ones(K, rank, M)).to(
-                self.device
-            )
+            (self.t.inverse(self.init_scale) * torch.ones(K, rank, M)).to(self.device)
         )
 
     @property
     def mu(self) -> torch.Tensor:
-        return self.trans.forward(self._inv_mu)
+        return self.t.forward(self._inv_mu)
 
     @mu.setter
     def mu(self, value: torch.Tensor | float):
-        self._inv_mu.data = self.trans.inverse(
+        self._inv_mu.data = self.t.inverse(
             value * torch.ones_like(self._inv_mu).data.clone()
         )
 
@@ -82,11 +78,11 @@ class HawkesLowRank(HawkesBase):
     def alpha(self) -> torch.Tensor:
         # Construct alpha as UV
         alpha_diag = torch.diag_embed(
-            self.trans.forward(self._inv_alpha_diag), dim1=-2, dim2=-1
+            self.t.forward(self._inv_alpha_diag), dim1=-2, dim2=-1
         )  # Shape: (K, M, M)
 
         alpha_off_diag = torch.matmul(
-            self.trans.forward(self._inv_U), self.trans.forward(self._inv_V)
+            self.t.forward(self._inv_U), self.t.forward(self._inv_V)
         )
 
         # This makes the diagonal elements sensitive to both U/V and alpha_diag
@@ -106,10 +102,10 @@ class HawkesLowRank(HawkesBase):
         if isinstance(value, float):
             # For scalar initialization, initialize U and V with sqrt(value)
             sqrt_val = math.sqrt(value)
-            self._inv_U.data = self.trans.inverse(
+            self._inv_U.data = self.t.inverse(
                 sqrt_val * torch.ones_like(self._inv_U).data
             )
-            self._inv_V.data = self.trans.inverse(
+            self._inv_V.data = self.t.inverse(
                 sqrt_val * torch.ones_like(self._inv_V).data
             )
         else:
@@ -120,15 +116,15 @@ class HawkesLowRank(HawkesBase):
                 U_k = U[:, : self.rank] * torch.sqrt(S[: self.rank])
                 V_k = V[: self.rank, :] * torch.sqrt(S[: self.rank, None])
                 # Set log parameters
-                self._inv_U.data[k] = self.trans.inverse(
+                self._inv_U.data[k] = self.t.inverse(
                     torch.abs(U_k) + 1e-8
                 )  # small constant for numerical stability
-                self._inv_V.data[k] = self.trans.inverse(torch.abs(V_k) + 1e-8)
+                self._inv_V.data[k] = self.t.inverse(torch.abs(V_k) + 1e-8)
 
     @property
     def gamma(self) -> torch.Tensor:
-        return self.trans.forward(self._inv_gamma)
+        return self.t.forward(self._inv_gamma)
 
     @gamma.setter
     def gamma(self, value: torch.Tensor):
-        self._inv_gamma.data = self.trans.inverse(value)
+        self._inv_gamma.data = self.t.inverse(value)

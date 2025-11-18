@@ -43,49 +43,49 @@ class HawkesUpperTriangular(HawkesBase):
 
         super().__init__(M, K, device=self.device, debug_config=debug_config)
 
-        self.trans = transformation
+        self.t = transformation
 
         if gamma_param:
             self._inv_gamma = torch.nn.Parameter(
-                (self.trans.inverse(gamma)).to(self.device)
+                (self.t.inverse(gamma)).to(self.device)
             )
         else:
-            self._inv_gamma = self.trans.inverse(gamma)
+            self._inv_gamma = self.t.inverse(gamma)
 
         self.rank = rank
         self.init_scale = torch.tensor([init_scale])
 
         # Initialize parameters
         self._inv_mu = torch.nn.Parameter(
-            (self.trans.inverse(self.init_scale) * torch.ones(M)).to(self.device)
+            (self.t.inverse(self.init_scale) * torch.ones(M)).to(self.device)
         )
         self._inv_alpha_diag = torch.nn.Parameter(
-            (self.trans.inverse(self.init_scale) * torch.ones(K, M)).to(self.device)
+            (self.t.inverse(self.init_scale) * torch.ones(K, M)).to(self.device)
         )  # Diagonal of alpha
         self._inv_P = torch.nn.Parameter(
-            (self.trans.inverse(self.init_scale) * torch.ones(M, rank)).to(self.device)
+            (self.t.inverse(self.init_scale) * torch.ones(M, rank)).to(self.device)
         )
         self._inv_L = torch.nn.Parameter(
-            (self.trans.inverse(self.init_scale) * torch.ones(K, rank, rank)).to(
+            (self.t.inverse(self.init_scale) * torch.ones(K, rank, rank)).to(
                 self.device
             )
         )
 
     @property
     def P(self) -> torch.Tensor:
-        return self.trans.forward(self._inv_P)
+        return self.t.forward(self._inv_P)
 
     @property
     def L(self) -> torch.Tensor:
-        return torch.triu(self.trans.forward(self._inv_L))
+        return torch.triu(self.t.forward(self._inv_L))
 
     @property
     def mu(self) -> torch.Tensor:
-        return self.trans.forward(self._inv_mu)
+        return self.t.forward(self._inv_mu)
 
     @mu.setter
     def mu(self, value: torch.Tensor | float):
-        self._inv_mu.data = self.trans.inverse(
+        self._inv_mu.data = self.t.inverse(
             value * torch.ones_like(self._inv_mu).data.clone()
         )
 
@@ -94,7 +94,7 @@ class HawkesUpperTriangular(HawkesBase):
         # Compute P @ L @ P^T for each kernel
         P = self.P  # avoid computing P twice
         alpha_diag = torch.diag_embed(
-            self.trans.forward(self._inv_alpha_diag), dim1=-2, dim2=-1
+            self.t.forward(self._inv_alpha_diag), dim1=-2, dim2=-1
         )  # Shape: (K, M, M)
 
         alpha_off_diag = torch.einsum(
@@ -117,10 +117,10 @@ class HawkesUpperTriangular(HawkesBase):
     def alpha(self, value: float):
         if isinstance(value, float):
             sqrt_sqrt_val = math.sqrt(math.sqrt(value))
-            self._inv_P.data = self.trans.inverse(
+            self._inv_P.data = self.t.inverse(
                 sqrt_sqrt_val * torch.ones_like(self._inv_P).data
             )
-            self._inv_L.data = self.trans.inverse(
+            self._inv_L.data = self.t.inverse(
                 sqrt_sqrt_val * torch.ones_like(self._inv_L).data
             )
 
@@ -134,8 +134,8 @@ class HawkesUpperTriangular(HawkesBase):
 
     @property
     def gamma(self) -> torch.Tensor:
-        return self.trans.forward(self._inv_gamma)
+        return self.t.forward(self._inv_gamma)
 
     @gamma.setter
     def gamma(self, value: torch.Tensor):
-        self._inv_gamma.data = self.trans.inverse(value)
+        self._inv_gamma.data = self.t.inverse(value)
