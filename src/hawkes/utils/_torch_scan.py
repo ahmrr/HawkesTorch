@@ -4,13 +4,14 @@ import torch
 from typing import Callable
 
 
-PREFIX_SCAN_IMPLEMENTATION = "BL"
+# Options: "hillis-steele", "blelloch", "pytorch"
+PREFIX_SCAN_IMPLEMENTATION = "blelloch"
 
-# TODO: Pad outside of scan function instead of repeatedly inside
+# TODO: Pad outside of scan function instead of repeatedly inside?
 
 
 def state_left_mult(B: torch.Tensor, A: torch.Tensor):
-    """Left-multiply operation for compressed transition matrices"""
+    """Left-multiply operation for transition states"""
 
     result = torch.empty_like(A)
     result[..., 0:1] = A[..., 0:1] * B[..., 0:1]  # Sa * Sb
@@ -18,37 +19,12 @@ def state_left_mult(B: torch.Tensor, A: torch.Tensor):
     return result
 
 
-def _prefix_scan_sequential(
-    x: torch.Tensor,
-    op: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-    dim: int = 0,
-):
-    """
-    Naive sequential inclusive prefix scan (reference implementation).
-
-    Args:
-        x: Sequence tensor of shape [*batch_dims, n, *op_dims]
-        op: Broadcastable associative operation on two tensors of shape [..., *op_dims]
-        dim: Dimension over which to compute the parallel scan
-
-    Returns:
-        torch.Tensor: Tensor of the same shape as x, containing the inclusive prefix scan
-    """
-
-    x = x.movedim(dim, -1)
-    out = x.clone()
-
-    for i in range(1, out.shape[-1]):
-        out[..., i] = op(out[..., i - 1], out[..., i])
-
-    return out.movedim(-1, dim)
-
-
 def _prefix_scan_hillis_steele(
     x: torch.Tensor,
     op: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
     dim: int = 0,
     pad_value: torch.Tensor | float = 0,
+    **kwargs,
 ):
     """
     Adapted from https://github.com/glassroom/torch_parallel_scan/blob/main/torch_parallel_scan/torch_parallel_scan.py
@@ -96,6 +72,8 @@ def _prefix_scan_blelloch(
     dim: int = 0,
     pad_value: torch.Tensor | float = 0,
     identity: torch.Tensor | float = 0,
+    autograd_safe: bool = False,
+    **kwargs,
 ):
     """
     Work-efficient inclusive parallel prefix scan using the Blelloch algorithm.
@@ -107,6 +85,7 @@ def _prefix_scan_blelloch(
         pad_value: Used for padding sequences to a power of two,
             either a float or a tensor of shape [*batch_dims, *op_dims]
         identity: Identity element under op used for the the downsweep
+        autograd_safe: Needed if autograd is used to compute gradients, slower and uses more memory
 
     Returns:
         torch.Tensor: Tensor of the same shape as x, containing the inclusive prefix scan
@@ -142,6 +121,10 @@ def _prefix_scan_blelloch(
         left = y[..., d - 1 : d]
         right = y[..., 2 * d - 1 : 2 * d]
 
+        if autograd_safe:
+            left = left.clone()
+            right = right.clone()
+
         joined = apply_op(left, right)
 
         y[..., 2 * d - 1 : 2 * d] = joined
@@ -161,6 +144,10 @@ def _prefix_scan_blelloch(
         left = y[..., d - 1 : d]
         right = y[..., 2 * d - 1 : 2 * d]
 
+        if autograd_safe:
+            left = left.clone()
+            right = right.clone()
+
         new_left = right
         new_right = apply_op(right, left)
 
@@ -177,14 +164,27 @@ def _prefix_scan_blelloch(
     return x.movedim(-1, dim)
 
 
+def _prefix_scan_pytorch(
+    x: torch.Tensor,
+    op: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    dim: int = 0,
+    **kwargs,
+):
+    """Prefix scan using PyTorch's built-in associative scan function"""
+
+    return torch._higher_order_ops.associative_scan(
+        op, x, dim=dim, combine_mode="generic"
+    )
+
+
 match PREFIX_SCAN_IMPLEMENTATION:
-    case "HS":
+    case "hillis-steele":
         prefix_scan = _prefix_scan_hillis_steele
-    case "BL":
+    case "blelloch":
         prefix_scan = _prefix_scan_blelloch
-    case "PY":
-        prefix_scan = lambda x, op, dim=0: torch._higher_order_ops.associative_scan(
-            op, x, dim=dim, combine_mode="generic"
-        )
+    case "pytorch":
+        prefix_scan = _prefix_scan_pytorch
     case _:
-        prefix_scan = _prefix_scan_sequential
+        raise ValueError(
+            f"Unknown prefix scan implementation: {PREFIX_SCAN_IMPLEMENTATION}"
+        )

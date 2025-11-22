@@ -1,4 +1,6 @@
 import torch
+
+from typing import Literal
 from dataclasses import dataclass
 from collections.abc import Callable
 
@@ -28,22 +30,30 @@ class HawkesFitConfig:
 
 
 @dataclass
-class HawkesDebugConfig:
+class HawkesRuntimeConfig:
     """
-    Dataclass containing debug options for the Hawkes models
+    Dataclass containing extra runtime options for the Hawkes models
 
     Attributes:
         deterministic_sim: Set to make simulated data deterministic (each run with the same params will simulate the exact same data)
         profile_mem_iters: Set to profile the memory usage of some amount of training iterations
         profile_mem_entries: Maximum number of recorded memory entries, if memory profiling is enabled
+        check_grad_epsilon: Set to compare gradients against autograd during fitting
+        detect_anomalies: Set to enable PyTorch anomaly detection during fitting
+        use_autograd_gradients: Use PyTorch autograd to compute gradients instead of custom backward
+        intensity_implementation: Which implementation to use for intensity computation (general, sequential, parallel)
     """
 
     deterministic_sim: bool = False
+
     profile_mem_iters: int = 0
     profile_mem_entries: int = 100000
+
     check_grad_epsilon: bool = False
     detect_anomalies: bool = False
     use_autograd_gradients: bool = False
+
+    intensity_implementation: Literal["general", "sequential", "parallel"] = "parallel"
 
 
 @dataclass

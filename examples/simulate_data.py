@@ -105,7 +105,7 @@ model_sim = models.HawkesFullRank(
     M=args.M,
     gamma=torch.tensor(sim_gamma).to(args.device),
     init_scale=sim_init_scale,
-    debug_config=config.HawkesDebugConfig(deterministic_sim=args.deterministic_sim),
+    runtime_config=config.HawkesRuntimeConfig(deterministic_sim=args.deterministic_sim),
 ).to(args.device)
 
 

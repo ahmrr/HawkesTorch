@@ -20,7 +20,7 @@ class HawkesUpperTriangular(HawkesBase):
         init_scale=0.1,
         gamma_param=False,
         transformation=config.SOFTPLUS,
-        debug_config=config.HawkesDebugConfig(),
+        runtime_config=config.HawkesRuntimeConfig(),
     ):
         """
         Args:
@@ -30,7 +30,7 @@ class HawkesUpperTriangular(HawkesBase):
             init_scale: Initial scale for all parameters
             gamma_param: Whether to parametrize gamma, the exponential kernel memory values
             transformation: A mapping for the learned parameters, meaning the model learns the inverse values of the params
-            debug_config: Debug configuration settings
+            runtime_config: Debug configuration settings
         """
 
         # TODO: fix out-of-memory errors
@@ -41,7 +41,7 @@ class HawkesUpperTriangular(HawkesBase):
         K = len(gamma)
         self.device = gamma.device
 
-        super().__init__(M, K, device=self.device, debug_config=debug_config)
+        super().__init__(M, K, device=self.device, runtime_config=runtime_config)
 
         self.t = transformation
 

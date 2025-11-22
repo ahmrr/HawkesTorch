@@ -75,7 +75,7 @@ parser.add_argument(
 args = parser.parse_args()
 
 # Obtain event sequence and reference interaction matrix
-seq = torch.load(args.events_file, weights_only=False)
+seq = torch.load(args.events_file, weights_only=False).to(args.device)
 
 # Fitting hyperparameters
 fit_config = config.HawkesFitConfig(
