@@ -10,6 +10,9 @@ from ..utils import config, _torch_scan
 torch.use_deterministic_algorithms(True)
 
 
+# Intensity calculation based on parallel prefix scan
+
+
 class HawkesLogSumIntensity(torch.autograd.Function):
     """
     Computes the log-sum intensity term in the NLL and its derivatives.
@@ -409,3 +412,125 @@ class HawkesIntegratedExcitation(torch.autograd.Function):
             gamma_grad *= grad_output
 
         return (None,) + (alpha_grad, gamma_grad) + (None,) * 2
+
+
+# Sequential intensity implementation for reference
+
+
+class HawkesLogSumIntensitySequential(torch.autograd.Function):
+    """
+    Computes log-sum intensity term in NLL and its derivatives using a sequential intensity recurrence.
+    """
+
+    @staticmethod
+    def forward(
+        ctx: Any,
+        seq: utils.EventSequence,
+        mu_at_events: torch.Tensor,
+        alpha: torch.Tensor,
+        gamma: torch.Tensor,
+        gamma_param: bool,
+    ):
+        K = gamma.shape[0]
+
+        nll_logsum_term = 0.0
+
+        state = torch.zeros(K, seq.M, device=seq.ti.device)
+
+        for i in range(seq.N):
+            t, m = seq.ti[i], seq.mi[i]
+            dt = (t - seq.ti[i - 1]) if i > 0 else 0.0
+
+            exp_dt = torch.exp(-gamma * dt).unsqueeze(-1)
+            alphas = (
+                alpha[:, seq.mi[i - 1], :] if i > 0 else torch.zeros_like(alpha[:, 0])
+            )
+
+            state = exp_dt * state + exp_dt * alphas
+
+            excitation = torch.sum(gamma[:, None] * state, dim=0)
+            intensity = mu_at_events[i] + excitation[m]
+
+            nll_logsum_term += torch.log(intensity)
+
+        # Save context for backward
+        ctx.M, ctx.T = seq.M, seq.T
+        ctx.gamma_param = gamma_param
+        ctx.save_for_backward(
+            seq.ti,
+            seq.mi,
+            mu_at_events,
+            alpha,
+            gamma,
+        )
+
+        return nll_logsum_term
+
+    @staticmethod
+    def backward(ctx: Any, grad_output: torch.Tensor):
+        (
+            _ti_saved,
+            _mi_saved,
+            mu_at_events,
+            alpha,
+            gamma,
+        ) = ctx.saved_tensors
+        K = gamma.shape[0]
+
+        seq = utils.EventSequence(_ti_saved, _mi_saved, T=ctx.T, M=ctx.M)
+
+        mu_grad = torch.empty_like(mu_at_events)
+        alpha_grad = torch.zeros_like(alpha)
+        gamma_grad = torch.zeros_like(gamma) if ctx.gamma_param else None
+
+        intensity_state = torch.zeros(K, seq.M, device=seq.ti.device)
+        alpha_grad_state = torch.zeros(K, seq.M, device=seq.ti.device)
+        if ctx.gamma_param:
+            gamma_grad_state = torch.zeros(K, seq.M, device=seq.ti.device)
+
+        for i in range(seq.N):
+            t, m = seq.ti[i], seq.mi[i]
+            dt = (t - seq.ti[i - 1]) if i > 0 else 0.0
+
+            exp_dt = torch.exp(-gamma * dt).unsqueeze(-1)
+            alphas = (
+                alpha[:, seq.mi[i - 1], :] if i > 0 else torch.zeros_like(alpha[:, 0])
+            )
+
+            # R_i = e^{-γ Δt_i} R_{i-1} + e^{-γ Δt_i} α_{m_{i-1}}
+            intensity_state = exp_dt * intensity_state + exp_dt * alphas
+
+            intensity_excitation = torch.sum(gamma[:, None] * intensity_state, dim=0)
+            intensity = mu_at_events[i] + intensity_excitation[m]
+
+            # K_i = e^{-γ Δt_i} K_{i-1} + e^{-γ Δt_i} e_{m_{i-1}}
+            alpha_grad_state = exp_dt * alpha_grad_state
+            alpha_grad_state[:, seq.mi[i - 1]] += exp_dt.squeeze(-1)
+
+            # L_i = e^{-γ Δt_i} L_{i-1} + t_{i-1} e^{-γ Δt_i} α_{m_{i-1}}
+            if ctx.gamma_param:
+                gamma_grad_state = (
+                    exp_dt * gamma_grad_state + seq.ti[i - 1] * exp_dt * alphas
+                )
+
+            alpha_grad_term = (
+                gamma[:, None] * alpha_grad_state / intensity
+            )  # Shape: [K, M]
+            alpha_grad[:, :, m] += alpha_grad_term
+
+            if ctx.gamma_param:
+                gamma_grad_term = (
+                    gamma * gamma_grad_state[:, m]
+                    + (1 - gamma * t) * intensity_state[:, m]
+                ) / intensity
+                gamma_grad += gamma_grad_term
+
+            # Gradient for mu depends only on intensities
+            mu_grad[i] = 1 / intensity
+
+        mu_grad *= grad_output
+        alpha_grad *= grad_output
+        if ctx.gamma_param:
+            gamma_grad *= grad_output
+
+        return (None,) + (mu_grad, alpha_grad, gamma_grad) + (None,) * 8

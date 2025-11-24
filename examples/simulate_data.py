@@ -20,9 +20,9 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument(
     "--T",
-    type=int,
-    default=500,
-    help="Set maximum simulated event time (default: T = 500)",
+    type=float,
+    default=float("inf"),
+    help="Set maximum simulated event time (default: no upper limit)",
 )
 parser.add_argument(
     "--M",
@@ -116,7 +116,7 @@ model_sim.alpha = (
 )
 
 # Simulate the event sequence and save intensity plot
-seq = model_sim.simulate(T=args.T, max_events=args.N)
+seq = model_sim.simulate(until_time=args.T, max_events=args.N)
 logger.info(f"Simulated event sequence of length {seq.N}")
 
 if args.intensity_plot != "false":

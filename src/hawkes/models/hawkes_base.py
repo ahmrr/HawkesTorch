@@ -7,7 +7,11 @@ from abc import ABC, abstractmethod
 
 from .. import utils
 from ..utils import config, _torch_scan
-from .hawkes_nll_function import HawkesLogSumIntensity, HawkesIntegratedExcitation
+from .hawkes_nll_function import (
+    HawkesLogSumIntensity,
+    HawkesIntegratedExcitation,
+    HawkesLogSumIntensitySequential,
+)
 
 
 class HawkesBase(torch.nn.Module, ABC):
@@ -51,17 +55,7 @@ class HawkesBase(torch.nn.Module, ABC):
         if runtime_config.use_autograd_gradients:
             self.nll = self._compute_nll
 
-        match runtime_config.intensity_implementation:
-            case "general":
-                self.intensity_at_events = self._intensity_reference_implementation
-            case "sequential":
-                self.intensity_at_events = self._intensity_sequential_implementation
-            case "parallel":
-                pass
-            case _:
-                raise ValueError(
-                    f"Unknown intensity implementation: {runtime_config.intensity_implementation}"
-                )
+        self.intensity_implementation = runtime_config.intensity_implementation
 
         # Print parameters and their device for quick sanity check
         for param in self.parameters():
@@ -363,15 +357,25 @@ class HawkesBase(torch.nn.Module, ABC):
 
         mu_at_events = self.mu[seq.mi]
 
-        nll_logsum_term = HawkesLogSumIntensity.apply(
-            seq,
-            mu_at_events,  # \mu_{m_i}(t_i)
-            self.alpha,  # \alpha_{p,q,k}
-            self.gamma,  # \gamma_k
-            gamma_param,
-            self.intensity_at_events,
-            batch_size,
-        )
+        match self.intensity_implementation:
+            case "general":
+                nll_logsum_term = self._log_sum_intensity_reference_implementation(seq)
+            case "sequential":
+                nll_logsum_term = self._log_sum_intensity_sequential_implementation(seq)
+            case "parallel":
+                nll_logsum_term = HawkesLogSumIntensity.apply(
+                    seq,
+                    mu_at_events,  # \mu_{m_i}(t_i)
+                    self.alpha,  # \alpha_{p,q,k}
+                    self.gamma,  # \gamma_k
+                    gamma_param,
+                    self.intensity_at_events,
+                    batch_size,
+                )
+            case _:
+                raise ValueError(
+                    f"Unknown intensity implementation: {self.intensity_implementation}"
+                )
 
         nll_integral_term = self.integrated_intensity(seq, batch_size=batch_size)
 
@@ -645,10 +649,10 @@ class HawkesBase(torch.nn.Module, ABC):
             else torch.zeros(self.K, self.M, device=self.device)
         )  # Shape: [K, M]
 
-        exp_decay = torch.exp(-self.gamma[:, None] * dti)  # Shape: [K, 1]
+        exp_dti = torch.exp(-self.gamma[:, None] * dti)  # Shape: [K, 1]
 
         # R = γ-decayed previous state + γ-decayed new impulse from last event
-        R = exp_decay * prev_state + exp_decay * alphas  # Shape: [K, M]
+        R = exp_dti * prev_state + exp_dti * alphas  # Shape: [K, M]
 
         λ = self.mu + torch.sum(self.gamma[:, None] * R, dim=0)
 
@@ -660,7 +664,7 @@ class HawkesBase(torch.nn.Module, ABC):
         else:
             return λ
 
-    def _intensity_sequential_implementation(
+    def _log_sum_intensity_sequential_implementation(
         self,
         seq: utils.EventSequence,
         **kwargs,
@@ -669,29 +673,24 @@ class HawkesBase(torch.nn.Module, ABC):
         Sequential implementation of intensity computation at each event time using the recurrence relation.
         """
 
-        prev_state = None
-        intensity = torch.zeros(seq.N, device=self.device)
+        gamma_param = any([("gamma" in n) for n, _ in self.named_parameters()])
+        mu_at_events = self.mu[seq.mi]
 
-        for i in range(seq.N):
-            intensity[i], prev_state = self.intensity_at_next_event(
-                t=seq.ti[i].item(),
-                m=seq.mi[i].item(),
-                ti=seq.ti[0:i],
-                mi=seq.mi[0:i],
-                prev_state=prev_state,
-                return_full_intensity=False,
-                return_next_state=True,
-            )
+        return HawkesLogSumIntensitySequential.apply(
+            seq,
+            mu_at_events,
+            self.alpha,
+            self.gamma,
+            gamma_param,
+        )
 
-        return intensity
-
-    def _intensity_reference_implementation(
+    def _log_sum_intensity_reference_implementation(
         self,
         seq: utils.EventSequence,
         **kwargs,
     ) -> torch.Tensor:
         """
-        General (inefficient) reference implementation of the intensity formula.
+        General (inefficient) reference implementation of the log-sum intensity formula.
         """
 
         t = seq.ti.view(-1, 1, 1)
@@ -717,7 +716,9 @@ class HawkesBase(torch.nn.Module, ABC):
 
         excitation = torch.sum(alpha_batch * self.gamma * exp_term, dim=(1, 2))
 
-        return mus + excitation.unsqueeze(1)
+        intensity = mus + excitation.unsqueeze(1)
+
+        return intensity.log().sum()
 
     @property
     def num_params(self) -> int:

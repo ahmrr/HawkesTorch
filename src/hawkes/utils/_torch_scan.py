@@ -132,7 +132,7 @@ def _prefix_scan_blelloch(
         d *= 2
 
     # For inclusive scan, save the total and zero the root
-    total = x[..., L - 1 : L]
+    total = x[..., L - 1 : L].clone()
     x[..., L - 1] = identity
 
     # Downsweep algorithm (construct prefixes)
