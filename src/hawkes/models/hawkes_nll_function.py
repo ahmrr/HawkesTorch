@@ -430,10 +430,12 @@ class HawkesLogSumIntensitySequential(torch.autograd.Function):
         alpha: torch.Tensor,
         gamma: torch.Tensor,
         gamma_param: bool,
+        integrated_excitation: bool = False,
     ):
         K = gamma.shape[0]
 
         nll_logsum_term = 0.0
+        nll_integral_term = 0.0
 
         state = torch.zeros(K, seq.M, device=seq.ti.device)
 
@@ -453,9 +455,20 @@ class HawkesLogSumIntensitySequential(torch.autograd.Function):
 
             nll_logsum_term += torch.log(intensity)
 
+            if integrated_excitation:
+                # 1 - e^{-γ_k (T - t_i)}
+                exp_term = -torch.expm1(-gamma[:, None] * (seq.T - t))
+                nll_integral_term += torch.sum(alpha[:, :, m] * exp_term)
+
+        # DEBUG
+        # print(nll_logsum_term)
+        # print(nll_integral_term)
+        # exit()
+
         # Save context for backward
         ctx.M, ctx.T = seq.M, seq.T
         ctx.gamma_param = gamma_param
+        ctx.integrated_excitation = integrated_excitation
         ctx.save_for_backward(
             seq.ti,
             seq.mi,
@@ -464,7 +477,7 @@ class HawkesLogSumIntensitySequential(torch.autograd.Function):
             gamma,
         )
 
-        return nll_logsum_term
+        return nll_logsum_term - nll_integral_term
 
     @staticmethod
     def backward(ctx: Any, grad_output: torch.Tensor):
@@ -505,7 +518,8 @@ class HawkesLogSumIntensitySequential(torch.autograd.Function):
 
             # K_i = e^{-γ Δt_i} K_{i-1} + e^{-γ Δt_i} e_{m_{i-1}}
             alpha_grad_state = exp_dt * alpha_grad_state
-            alpha_grad_state[:, seq.mi[i - 1]] += exp_dt.squeeze(-1)
+            if i > 0:
+                alpha_grad_state[:, seq.mi[i - 1]] += exp_dt.squeeze(-1)
 
             # L_i = e^{-γ Δt_i} L_{i-1} + t_{i-1} e^{-γ Δt_i} α_{m_{i-1}}
             if ctx.gamma_param:
@@ -527,6 +541,16 @@ class HawkesLogSumIntensitySequential(torch.autograd.Function):
 
             # Gradient for mu depends only on intensities
             mu_grad[i] = 1 / intensity
+
+            # Gradients for integrated excitation term
+            if ctx.integrated_excitation:
+                alpha_grad[:, m, :] -= 1 - torch.exp(-gamma[:, None] * (ctx.T - t))
+                gamma_grad -= torch.sum(
+                    (ctx.T - t)
+                    * alpha[:, m, :]
+                    * torch.exp(-gamma[:, None] * (ctx.T - t)),
+                    dim=1,
+                )
 
         mu_grad *= grad_output
         alpha_grad *= grad_output

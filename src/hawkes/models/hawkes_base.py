@@ -52,11 +52,6 @@ class HawkesBase(torch.nn.Module, ABC):
             torch.manual_seed(42)
             torch.cuda.manual_seed_all(42)
 
-        if runtime_config.use_autograd_gradients:
-            self.nll = self._compute_nll
-
-        self.intensity_implementation = runtime_config.intensity_implementation
-
         # Print parameters and their device for quick sanity check
         for param in self.parameters():
             print(param, param.device)
@@ -172,7 +167,9 @@ class HawkesBase(torch.nn.Module, ABC):
                     ti = torch.cat([ti, torch.tensor([t], device=self.device)])
                     R_λ = R  # update right-limit state
 
-        return utils.EventSequence(ti, mi, M=self.M)
+        return utils.EventSequence(
+            ti, mi, T=until_time if until_time != float("inf") else None, M=self.M
+        )
 
     def fit(
         self,
@@ -194,20 +191,30 @@ class HawkesBase(torch.nn.Module, ABC):
         # Logging basic training configuration and model size
         self.logger.info(f"Starting Hawkes process training: {self.__class__.__name__}")
         self.logger.info(
-            f"Configuration: M={self.M}, K={self.K}, N={seq.N:,}, T={seq.T}, steps={fit_config.num_steps}"
+            f"Configuration: M={self.M}, K={self.K}, N={seq.N:,}, T={seq.T:,.2f}, steps={fit_config.num_steps}"
             + (f", batch_size={fit_config.batch_size}" if fit_config.batch_size else "")
         )
         self.logger.info(
             f"Parameters: lr={fit_config.learning_rate}, l1={fit_config.l1_penalty}, nuc={fit_config.nuc_penalty}"
         )
         self.logger.info(f"Device: {self.device}, model params: {self.num_params:,}")
+        self.logger.info(
+            f"Using {self.runtime_config.intensity_implementation} intensity implementation"
+            + (
+                " with autograd gradients"
+                if self.runtime_config.use_autograd_gradients
+                else " with custom gradients"
+            )
+        )
 
         optimizer = torch.optim.Adam(self.parameters(), lr=fit_config.learning_rate)
         losses = []
         epoch_times = []
 
         if self.runtime_config.profile_mem_iters:
-            torch.cuda.memory._record_memory_history(max_entries=100000)
+            torch.cuda.memory._record_memory_history(
+                max_entries=self.runtime_config.profile_mem_entries
+            )
             self.logger.info(
                 f"Profiling {self.runtime_config.profile_mem_iters} training iterations (up to {self.runtime_config.profile_mem_entries} entries)"
             )
@@ -259,7 +266,7 @@ class HawkesBase(torch.nn.Module, ABC):
             # Optionally compute autograd gradients for cross-checking
             if self.runtime_config.check_grad_epsilon:
                 param_grads = torch.autograd.grad(
-                    (self._compute_nll(seq) + l1 + nuclear_norm),
+                    (self._nll_autograd_safe(seq) + l1 + nuclear_norm),
                     self.parameters(),
                 )
 
@@ -325,17 +332,19 @@ class HawkesBase(torch.nn.Module, ABC):
             final_sparsity = (
                 self.alpha.isclose(torch.zeros_like(self.alpha), atol=0.03).sum()
             ).sum() / self.alpha.numel()
-            loss_reduction = (
-                ((losses[0] - losses[-1]) / losses[0] * 100) if len(losses) > 1 else 0
-            )
+            loss_reduction = (losses[0] - losses[-1]) / losses[0]
+
+        hours = int(fit_time_real // 3600)
+        minutes = int((fit_time_real % 3600) // 60)
+        seconds = int(fit_time_real % 60)
 
         self.logger.info(
             f"Training summary: Final loss={losses[-1]:.4f}, "
-            f"Loss reduction={loss_reduction:.1f}%, "
+            f"Loss reduction={loss_reduction:.1%}, "
             f"Final sparsity={final_sparsity:.3f}"
         )
         self.logger.info(
-            f"Performance summary: Fitting time={time.strftime('%H:%M:%S', time.gmtime(fit_time_real))}, "
+            f"Performance summary: Fitting time={hours:02d}:{minutes:02d}:{seconds:02d}, "
             f"Average epoch time={sum(epoch_times) / len(epoch_times) * 1000:.3f}ms, "
             f"Peak memory={round(peak_mem_gpu / 2**20)}MiB"
         )
@@ -352,42 +361,68 @@ class HawkesBase(torch.nn.Module, ABC):
         seq: utils.EventSequence,
         batch_size: int | None = None,
     ):
+        """
+        Computes the negative log-likelihood of the given event sequence.
+        """
+
         gamma_param = any([("gamma" in n) for n, _ in self.named_parameters()])
         batch_size = min(batch_size or seq.N, seq.N)
 
         mu_at_events = self.mu[seq.mi]
 
-        match self.intensity_implementation:
-            case "general":
-                nll_logsum_term = self._log_sum_intensity_reference_implementation(seq)
-            case "sequential":
-                nll_logsum_term = self._log_sum_intensity_sequential_implementation(seq)
-            case "parallel":
-                nll_logsum_term = HawkesLogSumIntensity.apply(
-                    seq,
-                    mu_at_events,  # \mu_{m_i}(t_i)
-                    self.alpha,  # \alpha_{p,q,k}
-                    self.gamma,  # \gamma_k
-                    gamma_param,
-                    self.intensity_at_events,
-                    batch_size,
-                )
-            case _:
-                raise ValueError(
-                    f"Unknown intensity implementation: {self.intensity_implementation}"
-                )
+        if self.runtime_config.use_autograd_gradients:
+            nll = self._nll_parallel_intensity_autograd_safe(seq)
+        else:
+            match self.runtime_config.intensity_implementation:
+                case "general":
+                    nll = self._nll_general_intensity(seq)
+                case "sequential":
+                    nll = self._nll_sequential_intensity(seq)
+                case "parallel":
+                    nll = self._nll_parallel_intensity(seq, batch_size=batch_size)
+                case _:
+                    raise ValueError(
+                        f"Unknown intensity implementation: {self.runtime_config.intensity_implementation}"
+                    )
 
-        nll_integral_term = self.integrated_intensity(seq, batch_size=batch_size)
+        return -nll / seq.N
 
-        return -(nll_logsum_term - nll_integral_term) / seq.N
-
-    def _compute_nll(
+    def _nll_general_intensity(
         self,
         seq: utils.EventSequence,
         **kwargs,
     ) -> float:
         """
-        Compute the negative log-likelihood across all events.
+        Uses general intensity computation (reference implementation).
+        """
+
+        nll_log_sum = self._log_sum_intensity_general_implementation(seq)
+        nll_integral = self.integrated_intensity(seq)
+
+        return nll_log_sum - nll_integral
+
+    def _nll_sequential_intensity(
+        self,
+        seq: utils.EventSequence,
+        **kwargs,
+    ) -> float:
+        """
+        Uses sequential intensity computation (reference implementation).
+        """
+
+        nll_log_sum_excitation = self._log_sum_intensity_sequential_implementation(
+            seq, integrated_excitation=True
+        )
+
+        return nll_log_sum_excitation - self.integrated_base_rate(seq)
+
+    def _nll_parallel_intensity_autograd_safe(
+        self,
+        seq: utils.EventSequence,
+        **kwargs,
+    ) -> float:
+        """
+        Uses prefix scan intensity computation compatible with autograd (reference implementation).
         """
 
         intensity_at_events = self.intensity_at_events(seq, return_full_intensity=False)
@@ -395,7 +430,38 @@ class HawkesBase(torch.nn.Module, ABC):
         nll_logsum = intensity_at_events.log().sum()
         nll_integral = self.integrated_intensity(seq)
 
-        return -(nll_logsum - nll_integral) / seq.N
+        return nll_logsum - nll_integral
+
+    def _nll_parallel_intensity(
+        self,
+        seq: utils.EventSequence,
+        batch_size: int,
+        **kwargs,
+    ) -> float:
+        """
+        Uses parallel prefix scan intensity computation.
+        """
+
+        # DEBUG
+        # print(self.intensity_at_events(seq, return_full_intensity=False).log().sum())
+        # print(self.integrated_excitation(seq))
+        # exit()
+
+        gamma_param = any([("gamma" in n) for n, _ in self.named_parameters()])
+        mu_at_events = self.mu[seq.mi]
+
+        nll_log_sum = HawkesLogSumIntensity.apply(
+            seq,
+            mu_at_events,  # \mu_{m_i}(t_i)
+            self.alpha,  # \alpha_{p,q,k}
+            self.gamma,  # \gamma_k
+            gamma_param,
+            self.intensity_at_events,
+            batch_size,
+        )
+        nll_integral = self.integrated_intensity(seq, batch_size=batch_size)
+
+        return nll_log_sum - nll_integral
 
     def integrated_base_rate(
         self,
@@ -509,8 +575,6 @@ class HawkesBase(torch.nn.Module, ABC):
 
         # Build transition matrices for each time step: [exp_decay, exp_decay * alphas]
         M = torch.cat([exp_dti, exp_dti * alpha_mi], dim=2)  # Shape: [K, Nb, M+1]
-        # if batch_prev_state is not None:
-        #     M = torch.cat([batch_prev_state[:, None, :], M], dim=1)
         if batch_prev_state is not None:
             M[:, 0:1, :] = _torch_scan.state_left_mult(
                 batch_prev_state[:, None, :], M[:, 0:1, :]
@@ -521,10 +585,6 @@ class HawkesBase(torch.nn.Module, ABC):
         P = _torch_scan.prefix_scan(
             M, _torch_scan.state_left_mult, dim=1, autograd_safe=using_autograd
         )
-        # if batch_prev_state is not None:
-        #     P = _torch_scan.state_left_mult(
-        #         batch_prev_state[:, None, :], P
-        #     )  # Shape: [K, Nb, M+1]
 
         # Extract non-augmented right-limit states R for the last Nb prefixes
         states = P[:, -Nb:, 1:].permute(1, 2, 0)  # Shape: [Nb, M, K]
@@ -667,6 +727,7 @@ class HawkesBase(torch.nn.Module, ABC):
     def _log_sum_intensity_sequential_implementation(
         self,
         seq: utils.EventSequence,
+        integrated_excitation: bool = False,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -682,9 +743,10 @@ class HawkesBase(torch.nn.Module, ABC):
             self.alpha,
             self.gamma,
             gamma_param,
+            integrated_excitation,
         )
 
-    def _log_sum_intensity_reference_implementation(
+    def _log_sum_intensity_general_implementation(
         self,
         seq: utils.EventSequence,
         **kwargs,
@@ -703,18 +765,17 @@ class HawkesBase(torch.nn.Module, ABC):
         dt = t - ti  # [N, N, 1]
         valid = dt > 0  # mask of shape [N, N, 1]
 
-        # clamp dt only on valid entries
-        dt_pos = dt.masked_fill(~valid, 0.0)  # Now dt_pos <= something safe
+        dt_pos = dt.masked_fill(~valid, 0.0)
 
-        exp_term = torch.exp(-self.gamma * dt_pos)  # Safe: no positive exponent ever
-        exp_term = exp_term * valid  # Zero out invalid entries (no gradient leak)
+        exp_dt = torch.exp(-self.gamma * dt_pos)  # Safe: no positive exponent ever
+        exp_dt = exp_dt * valid  # Zero out invalid entries (no gradient leak)
 
         mus = self.mu[mi].view(N, 1)
 
         alpha_mi = self.alpha[:, mi].permute(1, 2, 0)  # [N, M, K]
         alpha_batch = alpha_mi[:, mi, :].permute(1, 0, 2)  # [N, N, K]
 
-        excitation = torch.sum(alpha_batch * self.gamma * exp_term, dim=(1, 2))
+        excitation = torch.sum(alpha_batch * self.gamma * exp_dt, dim=(1, 2))
 
         intensity = mus + excitation.unsqueeze(1)
 

@@ -54,6 +54,7 @@ class HawkesRuntimeConfig:
     use_autograd_gradients: bool = False
 
     intensity_implementation: Literal["general", "sequential", "parallel"] = "parallel"
+    prefix_scan_implementation: Literal["hillis-steele", "blelloch"] = "blelloch"
 
 
 @dataclass

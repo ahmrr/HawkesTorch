@@ -70,6 +70,7 @@ def _prefix_scan_blelloch(
     x: torch.Tensor,
     op: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
     dim: int = 0,
+    inclusive: bool = True,
     pad_value: torch.Tensor | float = 0,
     identity: torch.Tensor | float = 0,
     autograd_safe: bool = False,
@@ -132,7 +133,8 @@ def _prefix_scan_blelloch(
         d *= 2
 
     # For inclusive scan, save the total and zero the root
-    total = x[..., L - 1 : L].clone()
+    if inclusive:
+        total = x[..., L - 1 : L].clone()
     x[..., L - 1] = identity
 
     # Downsweep algorithm (construct prefixes)
@@ -157,34 +159,51 @@ def _prefix_scan_blelloch(
         d //= 2
 
     # Convert exclusive scan to inclusive by appending total
-    x = torch.cat([x[..., 1:L], total], dim=-1)
+    if inclusive:
+        x = torch.cat([x[..., 1:L], total], dim=-1)
 
     # Drop padding and move dimension back
     x = x[..., :n]
     return x.movedim(-1, dim)
 
 
-def _prefix_scan_pytorch(
+def prefix_scan(
     x: torch.Tensor,
     op: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
     dim: int = 0,
+    pad_value: torch.Tensor | float = 0,
+    identity: torch.Tensor | float = 0,
+    autograd_safe: bool = False,
+    implementation: str = PREFIX_SCAN_IMPLEMENTATION,
     **kwargs,
 ):
-    """Prefix scan using PyTorch's built-in associative scan function"""
+    """Prefix scan using selected implementation"""
 
-    return torch._higher_order_ops.associative_scan(
-        op, x, dim=dim, combine_mode="generic"
-    )
-
-
-match PREFIX_SCAN_IMPLEMENTATION:
-    case "hillis-steele":
-        prefix_scan = _prefix_scan_hillis_steele
-    case "blelloch":
-        prefix_scan = _prefix_scan_blelloch
-    case "pytorch":
-        prefix_scan = _prefix_scan_pytorch
-    case _:
-        raise ValueError(
-            f"Unknown prefix scan implementation: {PREFIX_SCAN_IMPLEMENTATION}"
+    if implementation == "hillis-steele":
+        return _prefix_scan_hillis_steele(
+            x,
+            op,
+            dim=dim,
+            pad_value=pad_value,
+            **kwargs,
         )
+    elif implementation == "blelloch":
+        return _prefix_scan_blelloch(
+            x,
+            op,
+            dim=dim,
+            pad_value=pad_value,
+            identity=identity,
+            autograd_safe=autograd_safe,
+            **kwargs,
+        )
+    elif implementation == "pytorch":
+        return torch._higher_order_ops.associative_scan(
+            op,
+            x,
+            dim=dim,
+            combine_mode="generic",
+            **kwargs,
+        )
+    else:
+        raise ValueError(f"Unknown prefix scan implementation: {implementation}")
