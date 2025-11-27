@@ -52,6 +52,11 @@ class HawkesBase(torch.nn.Module, ABC):
             torch.manual_seed(42)
             torch.cuda.manual_seed_all(42)
 
+        if runtime_config.prefix_scan_implementation is not None:
+            _torch_scan.PREFIX_SCAN_IMPLEMENTATION = (
+                runtime_config.prefix_scan_implementation
+            )
+
         # Print parameters and their device for quick sanity check
         for param in self.parameters():
             print(param, param.device)

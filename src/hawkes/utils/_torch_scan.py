@@ -174,12 +174,11 @@ def prefix_scan(
     pad_value: torch.Tensor | float = 0,
     identity: torch.Tensor | float = 0,
     autograd_safe: bool = False,
-    implementation: str = PREFIX_SCAN_IMPLEMENTATION,
     **kwargs,
 ):
     """Prefix scan using selected implementation"""
 
-    if implementation == "hillis-steele":
+    if PREFIX_SCAN_IMPLEMENTATION == "hillis-steele":
         return _prefix_scan_hillis_steele(
             x,
             op,
@@ -187,7 +186,7 @@ def prefix_scan(
             pad_value=pad_value,
             **kwargs,
         )
-    elif implementation == "blelloch":
+    elif PREFIX_SCAN_IMPLEMENTATION == "blelloch":
         return _prefix_scan_blelloch(
             x,
             op,
@@ -197,7 +196,7 @@ def prefix_scan(
             autograd_safe=autograd_safe,
             **kwargs,
         )
-    elif implementation == "pytorch":
+    elif PREFIX_SCAN_IMPLEMENTATION == "pytorch":
         return torch._higher_order_ops.associative_scan(
             op,
             x,
@@ -206,4 +205,6 @@ def prefix_scan(
             **kwargs,
         )
     else:
-        raise ValueError(f"Unknown prefix scan implementation: {implementation}")
+        raise ValueError(
+            f"Unknown prefix scan implementation: {PREFIX_SCAN_IMPLEMENTATION}"
+        )
