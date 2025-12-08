@@ -226,7 +226,8 @@ class HawkesBase(torch.nn.Module, ABC):
 
         self.logger.info("Starting training loop...")
 
-        if self.device != "cpu":
+        if torch.device(self.device).type != "cpu":
+            print(f'Resetting CUDA peak memory stats, device was "{self.device}"')
             torch.cuda.reset_peak_memory_stats()
 
         fit_time_real = time.perf_counter()
@@ -241,11 +242,16 @@ class HawkesBase(torch.nn.Module, ABC):
 
             # Optional L1 hinge penalty applied to small parameters
             if fit_config.l1_penalty > 0:
-                l1_mu = torch.where(self.mu < fit_config.l1_hinge, self.mu, 0).sum()
+                # Penalize off-diagonal alpha entries only
+                off_diagonal_mask = ~torch.eye(
+                    self.M, dtype=torch.bool, device=self.device
+                )[None, ...]
                 l1_alpha = torch.where(
-                    self.alpha < fit_config.l1_hinge, self.alpha, 0
+                    (self.alpha < fit_config.l1_hinge) & off_diagonal_mask,
+                    self.alpha,
+                    0,
                 ).sum()
-                l1 = fit_config.l1_penalty * (l1_mu + l1_alpha)
+                l1 = fit_config.l1_penalty * l1_alpha
             else:
                 l1 = 0
 
@@ -282,7 +288,10 @@ class HawkesBase(torch.nn.Module, ABC):
             losses.append(loss.item())
             epoch_times.append(epoch_time_real)
 
-            if epoch >= self.runtime_config.profile_mem_iters and self.device != "cpu":
+            if (
+                epoch >= self.runtime_config.profile_mem_iters
+                and torch.device(self.device).type != "cpu"
+            ):
                 torch.cuda.memory._record_memory_history(enabled=None)
 
             # Periodic logging with more diagnostics
@@ -301,7 +310,7 @@ class HawkesBase(torch.nn.Module, ABC):
                         f"Sparsity={sparsity_factor:.3f}, "
                         f"μ_mean={self.mu.mean().item():.4f}, "
                         f"α_mean={self.alpha.mean().item():.4f}, "
-                        f"γ_mean={self.gamma.mean().item():.4f}"
+                        f"γ={'[' + ', '.join(f'{g:.2g}' for g in self.gamma.tolist()) + ']'}, "
                     )
 
                 # Checking manual gradients against autograd
@@ -325,7 +334,10 @@ class HawkesBase(torch.nn.Module, ABC):
         peak_mem_gpu = torch.cuda.max_memory_allocated()
         fit_time_real = time.perf_counter() - fit_time_real
 
-        if self.runtime_config.profile_mem_iters and self.device != "cpu":
+        if (
+            self.runtime_config.profile_mem_iters
+            and torch.device(self.device).type != "cpu"
+        ):
             mem_file = f"outputs/mem/mem_snapshot_n{seq.N}_m{self.M}_b{fit_config.batch_size}_e{self.runtime_config.profile_mem_iters}.pkl"
             torch.cuda.memory._dump_snapshot(mem_file)
             self.logger.info(f"Saved memory profiling snapshot at {mem_file}")
