@@ -20,7 +20,7 @@ class EventSequence:
         # Compute defaults
         if self.M is None:
             self.M = int(self.mi.max().item()) + 1
-        if self.T is None:
+        if self.T is None or self.T == float("inf"):
             self.T = float(self.ti.max().item())
 
         self.N = self.ti.shape[0]

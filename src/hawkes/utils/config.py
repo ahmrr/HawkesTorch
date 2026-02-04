@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 
 @dataclass
-class HawkesFitConfig:
+class FitConfig:
     """
     Dataclass containing hyperparameters and configuration for Hawkes model fitting.
 
@@ -21,16 +21,17 @@ class HawkesFitConfig:
     """
 
     num_steps: int = 1000
-    batch_size: int = None
+    batch_size: int | None = None
     monitor_interval: int = 100
     learning_rate: float = 0.01
     l1_penalty: float = 0.01
     l1_hinge: float = 1
+    l1_alpha_diag: bool = True
     nuc_penalty: float = 0.01
 
 
 @dataclass
-class HawkesRuntimeConfig:
+class RuntimeConfig:
     """
     Dataclass containing extra runtime options for the Hawkes models
 

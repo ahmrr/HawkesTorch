@@ -36,7 +36,7 @@ def plot_intensity(
         intensity, intensity_states = model_sim.intensity_at_events(
             seq, return_all_states=True
         )
-        t_intensity = model_sim.intensity_at_t(t, seq, intensity_states).cpu()
+        t_intensity = model_sim.intensity(t, seq, intensity_states).cpu()
 
     t = t.cpu()
     seq = seq.to("cpu")

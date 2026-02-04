@@ -102,21 +102,23 @@ sim_alpha[0] = [I] * args.M  # Hub influences all nodes including self
 
 # Initialize model used for simulation
 model_sim = models.HawkesFullRank(
-    M=args.M,
+    base_process=models.PoissonHomogeneous(
+        M=args.M, mu_init=torch.tensor(sim_mu).to(args.device), device=args.device
+    ),
     gamma=torch.tensor(sim_gamma).to(args.device),
-    init_scale=sim_init_scale,
-    runtime_config=config.HawkesRuntimeConfig(deterministic_sim=args.deterministic_sim),
+    gamma_param=False,
+    alpha_init=sim_init_scale,
+    runtime_config=config.RuntimeConfig(deterministic_sim=args.deterministic_sim),
 ).to(args.device)
 
 
 # Set base excitation and interaction rates according to fixed sim params
-model_sim.mu = torch.tensor(sim_mu).to(args.device)
 model_sim.alpha = (
     torch.tensor(sim_alpha).to(args.device).unsqueeze(0).repeat(sim_K, 1, 1)
 )
 
 # Simulate the event sequence and save intensity plot
-seq = model_sim.simulate(until_time=args.T, max_events=args.N)
+seq = model_sim.simulate(max_events=args.N)
 logger.info(f"Simulated event sequence of length {seq.N}")
 
 if args.intensity_plot != "false":

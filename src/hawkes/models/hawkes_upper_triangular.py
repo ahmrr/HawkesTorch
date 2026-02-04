@@ -20,7 +20,7 @@ class HawkesUpperTriangular(HawkesBase):
         init_scale=0.1,
         gamma_param=False,
         transformation=config.SOFTPLUS,
-        runtime_config=config.HawkesRuntimeConfig(),
+        runtime_config=config.RuntimeConfig(),
     ):
         """
         Args:
