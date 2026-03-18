@@ -7,11 +7,7 @@ from abc import ABC, abstractmethod
 
 from .. import utils
 from ..utils import config, _torch_scan
-from .hawkes_nll_function import (
-    HawkesLogSumIntensity,
-    HawkesIntegratedExcitation,
-    HawkesLogSumIntensitySequential,
-)
+from .hawkes_nll_function import HawkesLogSumIntensity, HawkesIntegratedExcitation
 from .poisson_base import PoissonBase
 
 
@@ -245,7 +241,7 @@ class HawkesBase(torch.nn.Module, ABC):
 
         self.logger.info("Starting training loop...")
 
-        if self.device != "cpu":
+        if self.device.type != "cpu":
             torch.cuda.reset_peak_memory_stats()
 
         total_fit_time = time.perf_counter()
@@ -326,7 +322,7 @@ class HawkesBase(torch.nn.Module, ABC):
 
         total_fit_time = time.perf_counter() - total_fit_time
 
-        if self.device != "cpu":
+        if self.device.type != "cpu":
             peak_memory_usage = torch.cuda.max_memory_allocated()
 
         self.logger.info("Training completed successfully!")
@@ -352,7 +348,7 @@ class HawkesBase(torch.nn.Module, ABC):
             f"Average epoch time={sum(epoch_times) / len(epoch_times) * 1000:.3f}ms"
             + (
                 f", Peak memory={round(peak_memory_usage / 2**20)}MiB"
-                if self.device != "cpu"
+                if self.device.type != "cpu"
                 else ""
             )
         )
@@ -361,7 +357,9 @@ class HawkesBase(torch.nn.Module, ABC):
             "losses": losses,
             "epoch_times": epoch_times,
             "total_fit_time": total_fit_time,
-            "peak_memory_usage": peak_memory_usage if self.device != "cpu" else None,
+            "peak_memory_usage": (
+                peak_memory_usage if self.device.type != "cpu" else None
+            ),
         }
 
     def nll(
@@ -385,6 +383,7 @@ class HawkesBase(torch.nn.Module, ABC):
             self.alpha,
             self.gamma,
             self.gamma_param,
+            self.intensity_states,
             self.intensity_at_events,
             batch_size,
         )
@@ -407,38 +406,37 @@ class HawkesBase(torch.nn.Module, ABC):
         self,
         t: torch.Tensor,
         seq: utils.EventSequence,
-        intensity_states: torch.Tensor = None,
+        states: torch.Tensor | None = None,
     ):
         """
-        Compute the right-limit intensity at arbitrary times t (not necessarily events).
+        General function for computing the intensity.
 
-        If R (per-event states) is not provided, it is computed internally by
-        calling intensity_at_events(..., return_states=True).
+        Args:
+            seq: Event sequence
+            t: Times at which to compute the intensity; if None, use event times
+            states: Precomputed intensity states R; if None, compute them via intensity_states(...)
 
         Returns:
             Tensor shaped (len(t), M) giving intensities for all nodes at each t.
         """
 
-        if intensity_states is None:
-            with torch.no_grad():
-                _, intensity_states = self.intensity_at_events(
-                    seq, return_all_states=True
-                )
+        if states is None:
+            states = self.intensity_states(seq)
 
         # Find index of the most recent event before each t
-        idx = torch.searchsorted(seq.ti, t).to(seq.ti.device) - 1  # Shape: t.shape
+        idx = torch.searchsorted(seq.ti, t).to(self.device) - 1
         after_first_event = idx >= 0
         idx_ = idx[after_first_event]
         t_ = t[after_first_event]  # times that are after at least one event
 
-        # exp_decay for each kernel at each queried time relative to its last event
+        # Exponential decay for each time relative to its last event
         exp_decay = torch.exp(
             -self.gamma * (t_ - seq.ti[idx_]).unsqueeze(-1)
         )  # Shape: [t_.shape, K]
 
         # Contribution from stored R states (decayed) and the immediate alpha impulse
         state_sum = torch.sum(
-            self.gamma * exp_decay * intensity_states[idx_].permute(1, 0, 2), dim=-1
+            self.gamma * exp_decay * states[idx_].permute(1, 0, 2), dim=-1
         )  # Shape: [M, t_.shape]
         alpha_sum = torch.sum(
             self.alpha[:, seq.mi[idx_], :].permute(2, 1, 0) * self.gamma * exp_decay,
@@ -450,7 +448,7 @@ class HawkesBase(torch.nn.Module, ABC):
         )  # Shape: [M, t_.shape]
 
         # Handle times before the first event
-        baseline_intensity = self.mu(t[~after_first_event])
+        baseline_intensity = self.mu(t[~after_first_event])  # Shape: [t.shape, M]
 
         # Prepend baseline intensities for times before the first event
         return torch.cat(
@@ -461,106 +459,143 @@ class HawkesBase(torch.nn.Module, ABC):
             dim=0,
         )  # Shape: [t.shape, M]
 
-    def intensity_at_events(
+    def intensity_states(
         self,
-        seq: utils.EventSequence | tuple[float, torch.Tensor, torch.Tensor],
-        batch_prev_state: torch.Tensor | None = None,
-        batch_start: int | None = None,
-        batch_end: int | None = None,
-        return_full_intensity=True,
-        return_last_state=False,
-        return_all_states=False,
-    ) -> torch.Tensor:
+        seq: utils.EventSequence,
+        bounds: tuple[int, int] | None = None,
+        prev_state: torch.Tensor | None = None,
+        next_state: bool = False,
+        full_states: bool = True,
+    ):
         """
-        Compute intensities at the sequence of event times ti using a state-augmented
-        matrix recurrence and prefix scan. This is the preferred fast implementation
-        for GPU/batched evaluation of the intensity terms used in NLL.
+        Compute the intensity states R at event times in seq between start and end indices.
 
         Args:
-            seq: Either an EventSequence object or tuple of (T, ti, mi)
-            full_intensity: If True, return the full M-dimensional intensity at
-                            each event; otherwise return only the intensity of the
-                            node that actually experienced the event at that time.
-            batch_size: Number of events to use in each batch, or None to disable batchin
+            seq: Event sequence
+            bounds: Tuple of (start, end) indices of events to compute
+            prev_state: Previous augmented state tensor of shape (K, M+1)
+            next_state: If True, return the next state after the end index
+            full_states: If True, return full states; otherwise return only states
+                         corresponding to the event nodes
 
         Returns:
-            Depending on flags, returns λ (Nb x M) or (Nb x 1) plus optionally
-            the last prefix matrix (for batching) and the R states.
+            States of shape (n, M, K) where n is the number of events in bounds,
+            and optionally the augmented next state tensor of shape (K, M+1).
         """
 
-        # TODO: split into separate helper functions for clarity
-
-        if not isinstance(seq, utils.EventSequence):
-            seq = utils.EventSequence(seq[1], seq[2], T=seq[0], M=self.M)
-
-        using_autograd = self.runtime_config.use_autograd_gradients
-
-        # To prevent multiple computations of alpha matrix
         alpha = self.alpha
+        start = bounds[0] if bounds else 0
+        end = bounds[1] if bounds else seq.N
 
-        bs = batch_start or 0
-        be = batch_end or seq.N
-        Nb = be - bs
-
-        # Δt_i of shape [1, Nb, 1]
-        dti = seq.ti[bs:be] - (
-            torch.cat([seq.ti[0:1], seq.ti[0 : (be - 1)]])
-            if bs == 0
-            else seq.ti[(bs - 1) : (be - 1)]
-        )
-        dti = dti[None, :, None]
-
-        # α_{m_{i-1}} of shape [K, Nb, M]
-        alpha_mi = (
-            torch.cat(
+        if start != 0:
+            # Inter-event times Δt_i = t_i - t_{i-1} with Δt_1 = 0
+            dti = seq.ti[start:end] - seq.ti[(start - 1) : (end - 1)]  # Shape: [n]
+            # Influences α_{:, m_{i-1}, k}
+            alphas = alpha[:, seq.mi[(start - 1) : (end - 1)], :]  # Shape: [K, n, M]
+        else:
+            dti = seq.ti[0:end] - torch.cat([seq.ti[0:1], seq.ti[0 : (end - 1)]])
+            alphas = torch.cat(
                 [
                     torch.zeros_like(alpha[:, 0:1, :]),
-                    alpha[:, seq.mi[0 : (be - 1)], :],
+                    alpha[:, seq.mi[0 : (end - 1)], :],
                 ],
                 dim=1,
             )
-            if bs == 0
-            else alpha[:, seq.mi[(bs - 1) : (be - 1)], :]
-        )
 
-        # e^{-γ_k Δt_i}
-        exp_dti = torch.exp(-self.gamma * dti).permute(2, 1, 0)  # Shape: [K, Nb, 1]
+        dti = dti[None, :, None]  # Shape: [1, n, 1]
+        exp_dti = torch.exp(-self.gamma * dti).permute(2, 1, 0)  # Shape: [K, n, 1]
 
-        # Build transition matrices for each time step: [exp_decay, exp_decay * alphas]
-        M = torch.cat([exp_dti, exp_dti * alpha_mi], dim=2)  # Shape: [K, Nb, M+1]
-        if batch_prev_state is not None:
+        # Build transition matrices
+        M = torch.cat([exp_dti, exp_dti * alphas], dim=2)  # Shape: [K, n, M+1]
+        if prev_state is not None:
             M[:, 0:1, :] = _torch_scan.state_left_mult(
-                batch_prev_state[:, None, :], M[:, 0:1, :]
-            )  # Shape: [K, Nb+1, M+1]
+                prev_state[:, None, :], M[:, 0:1, :]
+            )
 
-        # Compute prefix products P via scan; P contains augmented states
-        # Shape: [K, Nb, M+1] (first batch) or [K, Nb+1, M+1] (regular batch)
-        P = _torch_scan.prefix_scan(
-            M, _torch_scan.state_left_mult, dim=1, autograd_safe=using_autograd
-        )
+        # Compute prefix products P via scan
+        P = _torch_scan.prefix_scan(M, _torch_scan.state_left_mult, dim=1)
 
-        # Extract non-augmented right-limit states R for the last Nb prefixes
-        states = P[:, -Nb:, 1:].permute(1, 2, 0)  # Shape: [Nb, M, K]
+        # Extract non-augmented states
+        R = P[:, :, 1:].permute(1, 2, 0)  # Shape: [n, M, K]
 
-        mu = self.mu_at_events(seq.ti[bs:be], seq.mi[bs:be])  # Shape: [Nb]
-        excitation = torch.sum(self.gamma * states, dim=2)
+        if not full_states:
+            R = torch.gather(
+                R, dim=1, index=seq.mi[start:end, None, None].expand(-1, 1, self.K)
+            )
 
-        # Convert states to intensities: μ + sum_k γ_k * R[..., k]
-        λ = mu[:, None] + excitation  # Shape: [Nb, M]
+        return (R, P[:, -1, :]) if next_state else R
 
-        # If only the intensity at the actual event node is required, pick it out
-        if not return_full_intensity:
-            λ = torch.gather(λ, dim=1, index=seq.mi[bs:be, None])  # Shape: [Nb, 1]
-            λ = λ.squeeze(1)
+    def intensity_at_events(
+        self,
+        seq: utils.EventSequence,
+        states: torch.Tensor,
+        full_intensity: bool = True,
+    ):
+        """
+        Compute the intensity at event times in seq using precomputed states R.
 
-        # Return assembled results according to requested flags
-        res = (λ,)
-        if return_all_states:
-            res += (states,)
-        if return_last_state:
-            res += (P[:, -1, :],)  # last prefix for next batch continuity
+        Args:
+            seq: Event sequence
+            states: Intensity states R computed via intensity_states(...)
+            full_intensity: If True, return full M-dimensional intensity at each event;
+                            otherwise return only the intensity of the node that
+                            experienced the event.
 
-        return res if len(res) > 1 else res[0]
+        Returns:
+            Tensor of shape (N, M) or (N,) giving intensities at each event time.
+        """
+
+        mu = self.mu(seq.ti)  # Shape: [N]
+        excitation = torch.sum(self.gamma * states, dim=2)  # Shape: [N, M]
+
+        intensity = mu + excitation
+
+        if not full_intensity:
+            intensity = intensity.gather(dim=1, index=seq.mi.unsqueeze(1)).squeeze(1)
+
+        return intensity
+
+    def rescaled_times(
+        self, seq: utils.EventSequence, states: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute the rescaled inter-event times using the time-rescaling theorem.
+
+        Args:
+            seq: Event sequence
+            states: Intensity states R computed via intensity_states(...)
+
+        Returns:
+            Tensor of shape (N-1, M) containing the rescaled inter-event times.
+        """
+
+        # R_{i}^k
+        states = states.permute(2, 0, 1)  # Shape: [K, N, M]
+
+        # Δt_{i+1} = t_{i+1} - t_{i}
+        dti = seq.ti[1:] - seq.ti[:-1]  # Shape: [N-1]
+
+        dti = dti[None, :, None]  # Shape: [1, N-1, 1]
+        exp_decay = 1 - torch.exp(-self.gamma * dti)
+        exp_decay = exp_decay.permute(2, 1, 0)  # Shape: [K, N-1, 1]
+
+        # α_{:, m_i, k}
+        alpha_mi = self.alpha[:, seq.mi[:-1], :]  # Shape: [K, N-1, M]
+
+        excitation_integrals = torch.sum(
+            exp_decay * (states[:, :-1, :] + alpha_mi), dim=0
+        )  # Shape: [N-1, M]
+
+        # TODO: Implement batched base rate integrals
+        base_integrals = []
+        for i in range(seq.N - 1):
+            base_integral = self.base_process.integral_mu(
+                seq.ti[i].item(), seq.ti[i + 1].item()
+            )  # Shape: [M]
+            base_integrals.append(base_integral)
+        base_integrals = torch.stack(base_integrals, dim=0)  # Shape: [N-1, M]
+
+        return base_integrals + excitation_integrals
 
     @property
     def num_params(self) -> int:

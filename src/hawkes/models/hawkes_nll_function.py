@@ -23,7 +23,8 @@ class HawkesLogSumIntensity(torch.autograd.Function):
         alpha: torch.Tensor,
         gamma: torch.Tensor,
         gamma_param: bool,
-        intensity_at_events_fun: Callable,
+        intensity_states_fn: Callable,
+        intensity_at_events_fn: Callable,
         batch_size: int,
     ):
         K = gamma.shape[0]
@@ -34,29 +35,27 @@ class HawkesLogSumIntensity(torch.autograd.Function):
         intensity_states_at_events = torch.empty(seq.N, 1, K, device=seq.ti.device)
 
         prev_state = None
-        for bs in range(0, seq.N, batch_size):
-            be = min(bs + batch_size, seq.N)
+        for batch_start in range(0, seq.N, batch_size):
+            batch_end = min(batch_start + batch_size, seq.N)
 
-            (
-                batch_intensity,
-                batch_states,
-                prev_state,
-            ) = intensity_at_events_fun(
+            batch_states, prev_state = intensity_states_fn(
                 seq,
-                batch_prev_state=prev_state,
-                batch_start=bs,
-                batch_end=be,
-                return_full_intensity=False,
-                return_last_state=True,
-                return_all_states=True,
+                bounds=(batch_start, batch_end),
+                prev_state=prev_state,
+                next_state=True,
+                full_states=False,
             )
 
-            intensity_at_events[bs:be] = batch_intensity
-            intensity_states_at_events[bs:be] = torch.gather(
-                batch_states, dim=1, index=seq.mi[bs:be, None, None].expand(-1, 1, K)
+            batch_intensity = intensity_at_events_fn(
+                seq,
+                states=batch_states,
+                full_intensity=False,
             )
 
-            # Sum log intensities (the log lambda term in NLL)
+            intensity_at_events[batch_start:batch_end] = batch_intensity
+            intensity_states_at_events[batch_start:batch_end] = batch_states
+
+            # Accumulate log intensities
             nll_logsum_term += torch.sum(torch.log(batch_intensity))
 
         # Save context for backward
@@ -137,7 +136,7 @@ class HawkesLogSumIntensity(torch.autograd.Function):
         if ctx.gamma_param:
             gamma_grad *= grad_output
 
-        return (None,) + (mu_grad, alpha_grad, gamma_grad) + (None,) * 8
+        return (None,) + (mu_grad, alpha_grad, gamma_grad) + (None,) * 9
 
 
 def _compute_alpha_grad(

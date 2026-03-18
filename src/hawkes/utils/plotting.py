@@ -33,14 +33,15 @@ def plot_intensity(
 
     t = torch.linspace(0, seq.ti.max(), grid, device=seq.ti.device)
     with torch.no_grad():
-        intensity, intensity_states = model_sim.intensity_at_events(
-            seq, return_all_states=True
+        intensity_states = model_sim.intensity_states(seq)
+        intensity_at_events = model_sim.intensity_at_events(
+            seq, states=intensity_states, full_intensity=False
         )
         t_intensity = model_sim.intensity(t, seq, intensity_states).cpu()
 
     t = t.cpu()
     seq = seq.to("cpu")
-    intensity = intensity.cpu()
+    intensity_at_events = intensity_at_events.cpu()
 
     fig, ax = plt.subplots(seq.M, 1, figsize=(9, seq.M), sharex=True, sharey=False)
 
@@ -55,7 +56,7 @@ def plot_intensity(
         ax[g].plot(t.squeeze(), t_intensity[:, g], label=f"Account {g}", linewidth=1)
         # ax[g].plot(times_g, intensity[mask, g], ".")  # Experimental: plot event points
         ax[g].set_xlim(0, seq.ti.max())
-        ax[g].set_ylim(0, torch.ceil(torch.max(intensity)))
+        ax[g].set_ylim(0, torch.ceil(torch.max(intensity_at_events)))
 
         if g > 0:
             ax[g].set_yticklabels([])
