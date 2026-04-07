@@ -1,6 +1,7 @@
 import math
 import torch
 import typing
+import torch.nn as nn
 
 from . import HawkesBase
 from ..utils import config
@@ -46,9 +47,7 @@ class HawkesUpperTriangular(HawkesBase):
         self.t = transformation
 
         if gamma_param:
-            self._inv_gamma = torch.nn.Parameter(
-                (self.t.inverse(gamma)).to(self.device)
-            )
+            self._inv_gamma = nn.Parameter((self.t.inverse(gamma)).to(self.device))
         else:
             self._inv_gamma = self.t.inverse(gamma)
 
@@ -56,16 +55,16 @@ class HawkesUpperTriangular(HawkesBase):
         self.init_scale = torch.tensor([init_scale])
 
         # Initialize parameters
-        self._inv_mu = torch.nn.Parameter(
+        self._inv_mu = nn.Parameter(
             (self.t.inverse(self.init_scale) * torch.ones(M)).to(self.device)
         )
-        self._inv_alpha_diag = torch.nn.Parameter(
+        self._inv_alpha_diag = nn.Parameter(
             (self.t.inverse(self.init_scale) * torch.ones(K, M)).to(self.device)
         )  # Diagonal of alpha
-        self._inv_P = torch.nn.Parameter(
+        self._inv_P = nn.Parameter(
             (self.t.inverse(self.init_scale) * torch.ones(M, rank)).to(self.device)
         )
-        self._inv_L = torch.nn.Parameter(
+        self._inv_L = nn.Parameter(
             (self.t.inverse(self.init_scale) * torch.ones(K, rank, rank)).to(
                 self.device
             )

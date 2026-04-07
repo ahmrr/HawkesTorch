@@ -10,7 +10,7 @@ def plot_intensity(
     seq: utils.EventSequence,
     model_sim: models.HawkesBase,
     grid: int = 1000,
-    output: str = "intensity_plot.png",
+    output: str | None = None,
     plot_events: bool = True,
 ):
     """
@@ -53,7 +53,7 @@ def plot_intensity(
             for eventt in times_g:
                 ax[g].axvline(eventt.item(), color="r", linestyle="-", linewidth=0.5)
 
-        ax[g].plot(t.squeeze(), t_intensity[:, g], label=f"Account {g}", linewidth=1)
+        ax[g].plot(t.squeeze(), t_intensity[:, g], label=f"{g}", linewidth=1)
         # ax[g].plot(times_g, intensity[mask, g], ".")  # Experimental: plot event points
         ax[g].set_xlim(0, seq.ti.max())
         ax[g].set_ylim(0, torch.ceil(torch.max(intensity_at_events)))
@@ -65,11 +65,10 @@ def plot_intensity(
         if g == seq.M - 1:
             ax[g].set_xlabel("Time (arbitrary)")
 
-        label = f"Account {g}" if g == 0 else g
         ax[g].text(
             0.01,
             0.88,
-            label,
+            g,
             transform=ax[g].transAxes,
             ha="left",
             va="top",
@@ -81,14 +80,19 @@ def plot_intensity(
     fig.tight_layout()
     fig.subplots_adjust(hspace=0)
     fig.text(0.0, 0.5, "Intensity", va="center", rotation="vertical")
-    plt.savefig(output, dpi=300, bbox_inches="tight")
+
+    if output:
+        plt.savefig(output, dpi=300, bbox_inches="tight")
+    else:
+        plt.show()
+
     plt.close(fig)
 
 
 def plot_diagnostic(
     true_alpha: torch.Tensor,
     estimated_alpha: torch.Tensor,
-    output: str = "diagnostic_plot.png",
+    output: str | None = None,
 ):
     """
     A diagnostic plot comparing an arbitrarily chosen or known-to-be-true interaction matrix with a learned one.
@@ -140,7 +144,11 @@ def plot_diagnostic(
         ax.set_yticks([])
         fig.colorbar(heatmap, ax=ax, fraction=0.046, pad=0.04)
 
-    plt.savefig(output, dpi=300, bbox_inches="tight")
+    if output:
+        plt.savefig(output, dpi=300, bbox_inches="tight")
+    else:
+        plt.show(fig)
+
     plt.close(fig)
 
 
@@ -150,7 +158,7 @@ def plot_residuals(
     T,
     max_events,
     num_simulations=10,
-    output: str = "residual_plot.png",
+    output: str | None = None,
 ):
     """
     Simulate data from a simulation model and plot the residuals of a fitted model, and compare the residuals to that of a Poisson process.
@@ -219,5 +227,10 @@ def plot_residuals(
     plt.legend(loc="upper left")
     plt.title(f"Residuals for {num_simulations} Simulations")
     plt.tight_layout()
-    plt.savefig(output, dpi=300, bbox_inches="tight")
+
+    if output:
+        plt.savefig(output, dpi=300, bbox_inches="tight")
+    else:
+        plt.show()
+
     plt.close()

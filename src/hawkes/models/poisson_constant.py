@@ -9,9 +9,9 @@ from .. import utils
 from ..utils import config
 
 
-class PoissonHomogeneous(PoissonBase):
+class PoissonConstant(PoissonBase):
     """
-    Homogeneous (constant) Poisson process implementation.
+    Constant (homogeneous) Poisson process implementation.
     """
 
     def __init__(

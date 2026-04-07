@@ -1,8 +1,9 @@
 import math
 import torch
 import typing
+import torch.nn as nn
 
-from . import HawkesBase, PoissonBase
+from . import HawkesBase, HawkesPenalty, PoissonBase
 from ..utils import config, _torch_scan
 
 
@@ -15,6 +16,7 @@ class HawkesFullRank(HawkesBase):
         gamma_param: bool,
         base_process: PoissonBase,
         alpha_init: torch.Tensor | float | None = None,
+        penalization: HawkesPenalty = HawkesPenalty(),
         transformation=config.SOFTPLUS,
         runtime_config=config.RuntimeConfig(),
         device: str | None = None,
@@ -35,7 +37,9 @@ class HawkesFullRank(HawkesBase):
 
         K = len(gamma)
 
-        super().__init__(K, gamma_param, base_process, runtime_config, device)
+        super().__init__(
+            K, gamma_param, base_process, penalization, runtime_config, device
+        )
 
         self.t = transformation
 
@@ -48,11 +52,11 @@ class HawkesFullRank(HawkesBase):
         inv_alpha = self.t.inverse(alpha_init).to(self.device)
 
         if gamma_param:
-            self._inv_gamma = torch.nn.Parameter(inv_gamma)
+            self._inv_gamma = nn.Parameter(inv_gamma)
         else:
             self._inv_gamma = inv_gamma
 
-        self._inv_alpha = torch.nn.Parameter(inv_alpha)
+        self._inv_alpha = nn.Parameter(inv_alpha)
 
     @property
     def alpha(self) -> torch.Tensor:

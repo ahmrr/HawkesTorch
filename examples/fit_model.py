@@ -56,9 +56,9 @@ parser.add_argument(
 parser.add_argument(
     "--model-type",
     type=str,
-    default="low-rank",
+    default="full-rank",
     choices=["full-rank", "low-rank", "upper-triangular"],
-    help="What type of Hawkes model parametrization to use (default: low-rank)",
+    help="What type of Hawkes model parametrization to use (default: full-rank)",
 )
 parser.add_argument(
     "--events-file",
@@ -88,9 +88,20 @@ fit_config = config.FitConfig(
     l1_alpha_diag=True,
     nuc_penalty=0,
 )
-est_gamma = [0.1] * 3
+est_gamma = [0.1] * 1
 est_init_scale = 0.01
 est_rank = 3
+
+base_process = models.PoissonHomogeneous(M=seq.M, mu_init=0.01, device=args.device)
+# base_process = models.PoissonFourierSeries(
+#     M=seq.M,
+#     T=0.1,
+#     num_modes=1,
+#     fourier_init=torch.tensor([2.0, 2.0], device=args.device)[None, :, None].repeat(
+#         seq.M, 1, 1
+#     ),
+#     device=args.device,
+# )
 
 # Fit estimation model
 match args.model_type:
@@ -98,26 +109,24 @@ match args.model_type:
         model_est = models.HawkesFullRank(
             gamma=torch.tensor(est_gamma).to(args.device),
             gamma_param=True,
-            base_process=models.PoissonHomogeneous(M=seq.M, mu_init=0.01).to(
-                args.device
-            ),
+            base_process=base_process,
             alpha_init=est_init_scale,
         ).to(args.device)
     case "low-rank":
         model_est = models.HawkesLowRank(
-            M=seq.M,
-            gamma=torch.tensor(est_gamma).to(args.device),
             rank=est_rank,
-            init_scale=est_init_scale,
+            gamma=torch.tensor(est_gamma).to(args.device),
             gamma_param=True,
+            base_process=base_process,
+            alpha_init=est_init_scale,
         ).to(args.device)
     case "upper-triangular":
         model_est = models.HawkesUpperTriangular(
-            M=seq.M,
-            gamma=torch.tensor(est_gamma).to(args.device),
             rank=est_rank,
-            init_scale=est_init_scale,
+            gamma=torch.tensor(est_gamma).to(args.device),
             gamma_param=True,
+            base_process=base_process,
+            alpha_init=est_init_scale,
         ).to(args.device)
 
 _ = model_est.fit(seq, fit_config)

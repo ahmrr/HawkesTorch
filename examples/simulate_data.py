@@ -100,11 +100,22 @@ sim_alpha[0] = [I] * args.M  # Hub influences all nodes including self
 #     [0, 0, 0, 0, 0, 0, 0, 0, 0, I],
 # ]
 
+base_process = models.PoissonConstant(
+    M=args.M, mu_init=torch.tensor(sim_mu).to(args.device)
+).to(args.device)
+# base_process = models.PoissonFourier(
+#     M=args.M,
+#     T=0.1,
+#     num_modes=1,
+#     # fourier_init=torch.tensor([2.0, 2.0], device=args.device)[None, :, None].repeat(
+#     #     args.M, 1, 1
+#     # ),
+#     device=args.device,
+# )
+
 # Initialize model used for simulation
 model_sim = models.HawkesFullRank(
-    base_process=models.PoissonHomogeneous(
-        M=args.M, mu_init=torch.tensor(sim_mu).to(args.device), device=args.device
-    ),
+    base_process=base_process,
     gamma=torch.tensor(sim_gamma).to(args.device),
     gamma_param=False,
     alpha_init=sim_init_scale,
@@ -119,7 +130,7 @@ model_sim.alpha = (
 
 # Simulate the event sequence and save intensity plot
 seq = model_sim.simulate(max_events=args.N)
-logger.info(f"Simulated event sequence of length {seq.N}")
+logger.info(f"Simulated event sequence of length {seq.N} in [0, {seq.T:.2f}]")
 
 if args.intensity_plot != "false":
     plotting.plot_intensity(seq, model_sim, output=args.intensity_plot)

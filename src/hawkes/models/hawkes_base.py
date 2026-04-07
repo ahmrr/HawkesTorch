@@ -3,12 +3,44 @@ import time
 import torch
 import typing
 import logging
+from dataclasses import dataclass
 from abc import ABC, abstractmethod
 
 from .. import utils
 from ..utils import config, _torch_scan
 from .hawkes_nll_function import HawkesLogSumIntensity, HawkesIntegratedExcitation
 from .poisson_base import PoissonBase
+
+
+@dataclass
+class HawkesPenalty:
+    """
+    Penalization hyperparameters for the base Hawkes process.
+
+    Attributes:
+        l1_alpha: L1 penalty weight for alpha (encourages sparsity)
+        l1_alpha_hinge: Threshold below which L1 penalty is applied to alpha
+        l2_alpha: L2 penalty weight for alpha (encourages small magnitudes)
+        l2_alpha_hinge: Threshold below which L2 penalty is applied to alpha
+        nuc_alpha: Nuclear norm penalty weight for alpha (encourages low-rank structure)
+        penalize_alpha_diag: Whether to include diagonal entries of alpha in L1 penalty
+        l1_gamma: L1 penalty weight for gamma (encourages sparsity)
+        l1_gamma_hinge: Threshold below which L1 penalty is applied to gamma
+        l2_gamma: L2 penalty weight for gamma (encourages small magnitudes)
+        l2_gamma_hinge: Threshold below which L2 penalty is applied to gamma
+    """
+
+    l1_alpha: float = 0.01
+    l1_alpha_hinge: float = 0.05
+    l2_alpha: float = 0.0
+    l2_alpha_hinge: float = float("inf")
+    nuc_alpha: float = 0.0
+    penalize_alpha_diag: bool = True
+
+    l1_gamma: float = 0.0
+    l1_gamma_hinge: float = float("inf")
+    l2_gamma: float = 0.0
+    l2_gamma_hinge: float = float("inf")
 
 
 class HawkesBase(torch.nn.Module, ABC):
@@ -26,7 +58,8 @@ class HawkesBase(torch.nn.Module, ABC):
         K: int,
         gamma_param: bool,
         base_process: PoissonBase,
-        runtime_config=config.RuntimeConfig(),
+        penalization: HawkesPenalty = HawkesPenalty(),
+        runtime_config: config.RuntimeConfig = config.RuntimeConfig(),
         device: str | None = None,
     ):
         """
@@ -34,6 +67,7 @@ class HawkesBase(torch.nn.Module, ABC):
             K: Number of exponential kernels per pair (memory components)
             gamma_param: Whether the decay rates are learnable parameters
             base_process: Base Poisson process model
+            penalization: Hawkes penalization hyperparameters
             device: Torch device (e.g., "cpu" or "cuda")
             runtime_config: Runtime configuration for debugging and profiling
         """
@@ -43,6 +77,7 @@ class HawkesBase(torch.nn.Module, ABC):
         self.M = base_process.M
         self.gamma_param = gamma_param
         self.base_process = base_process
+        self.penalization = penalization
 
         self.device = torch.device(device or base_process.device)
         self.runtime_config = runtime_config
@@ -227,11 +262,8 @@ class HawkesBase(torch.nn.Module, ABC):
             f"Starting Hawkes process training: {self.__class__.__name__} with base process {self.base_process.__class__.__name__}"
         )
         self.logger.info(
-            f"Configuration: M={self.M}, K={self.K}, N={seq.N:,}, T={seq.T:,.2f}, steps={fit_config.num_steps}"
+            f"Configuration: M={self.M}, K={self.K}, N={seq.N:,}, T={seq.T:,.2f}, lr={fit_config.learning_rate}, steps={fit_config.num_steps}"
             + (f", batch_size={fit_config.batch_size}" if fit_config.batch_size else "")
-        )
-        self.logger.info(
-            f"Parameters: lr={fit_config.learning_rate}, l1={fit_config.l1_penalty}, nuc={fit_config.nuc_penalty}"
         )
         self.logger.info(f"Device: {self.device}, model params: {self.num_params:,}")
 
@@ -251,40 +283,9 @@ class HawkesBase(torch.nn.Module, ABC):
 
             optimizer.zero_grad()
 
-            # Compute negative log-likelihood
+            # Compute loss
             nll = self.nll(seq, batch_size=fit_config.batch_size)
-
-            # Optional L1 hinge penalty applied to small parameters
-            if fit_config.l1_penalty > 0:
-                if fit_config.l1_alpha_diag:
-                    l1_alpha = torch.where(
-                        self.alpha < fit_config.l1_hinge, self.alpha, 0
-                    ).sum()
-                else:
-                    # Penalize off-diagonal alpha entries only
-                    off_diagonal_mask = ~torch.eye(
-                        self.M, dtype=torch.bool, device=self.device
-                    )[None, ...]
-                    l1_alpha = torch.where(
-                        (self.alpha < fit_config.l1_hinge) & off_diagonal_mask,
-                        self.alpha,
-                        0,
-                    ).sum()
-
-                l1 = fit_config.l1_penalty * l1_alpha
-            else:
-                l1 = 0
-
-            # Optional nuclear-norm penalty on alpha
-            if fit_config.nuc_penalty > 0:
-                nuclear_norm = (
-                    fit_config.nuc_penalty
-                    * torch.linalg.matrix_norm(self.alpha, ord="nuc", dim=(1, 2)).sum()
-                )
-            else:
-                nuclear_norm = 0
-
-            loss = nll + l1 + nuclear_norm
+            loss = nll + self.penalty() + self.base_process.penalty()
             loss.backward()
 
             # Ensure gradients are finite
@@ -315,9 +316,9 @@ class HawkesBase(torch.nn.Module, ABC):
                         f"Epoch {epoch + 1}/{fit_config.num_steps}: "
                         f"Loss={full_nll.item():.4f}, "
                         f"Sparsity={sparsity_factor:.3f}, "
-                        f"{self.base_process.report_parameters()}, "
                         f"α_mean={self.alpha.mean().item():.4f}, "
                         f"γ={'[' + ', '.join(f'{g:.2g}' for g in self.gamma.tolist()) + ']'}, "
+                        f"{self.base_process.report_parameters()}"
                     )
 
         total_fit_time = time.perf_counter() - total_fit_time
@@ -401,6 +402,66 @@ class HawkesBase(torch.nn.Module, ABC):
         nll_integral = base_rate_integral + excitation_integral
 
         return -(nll_log_sum - nll_integral) / seq.N
+
+    def penalty(self) -> float:
+        """Compute penalty term for the model parameters."""
+
+        off_diagonal_mask = ~torch.eye(self.M, dtype=torch.bool, device=self.device)[
+            None, ...
+        ]
+
+        penalty = 0.0
+
+        # L1 penalty on small alpha parameters
+        if self.penalization.l1_alpha > 0:
+            mask = (
+                self.alpha < self.penalization.l1_alpha_hinge
+                if self.penalization.penalize_alpha_diag
+                else (self.alpha < self.penalization.l1_alpha_hinge) & off_diagonal_mask
+            )
+            l1_alpha = torch.where(
+                mask,
+                self.alpha,
+                0,
+            ).sum()
+            penalty += self.penalization.l1_alpha * l1_alpha
+
+        # L2 penalty on small alpha parameters
+        if self.penalization.l2_alpha > 0:
+            mask = (
+                self.alpha < self.penalization.l2_alpha_hinge
+                if self.penalization.penalize_alpha_diag
+                else (self.alpha < self.penalization.l2_alpha_hinge) & off_diagonal_mask
+            )
+            l2_alpha = torch.where(
+                mask,
+                self.alpha**2,
+                0,
+            ).sum()
+            penalty += self.penalization.l2_alpha * l2_alpha
+
+        # Nuclear norm penalty on alpha
+        if self.penalization.nuc_alpha > 0:
+            nuclear_norm = torch.linalg.matrix_norm(
+                self.alpha, ord="nuc", dim=(1, 2)
+            ).sum()
+            penalty += self.penalization.nuc_alpha * nuclear_norm
+
+        # L1 penalty on small gamma parameters
+        if self.penalization.l1_gamma > 0:
+            l1_gamma = torch.where(
+                self.gamma < self.penalization.l1_gamma_hinge, self.gamma, 0
+            ).sum()
+            penalty += self.penalization.l1_gamma * l1_gamma
+
+        # L2 penalty on small gamma parameters
+        if self.penalization.l2_gamma > 0:
+            l2_gamma = torch.where(
+                self.gamma < self.penalization.l2_gamma_hinge, self.gamma**2, 0
+            ).sum()
+            penalty += self.penalization.l2_gamma * l2_gamma
+
+        return penalty
 
     def intensity(
         self,

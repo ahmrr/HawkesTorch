@@ -105,7 +105,7 @@ class PoissonBase(torch.nn.Module, ABC):
         self,
         t_start: torch.Tensor | float,
         t_end: torch.Tensor | float,
-        n_points: int = 100,
+        n_points: int = 100000,
     ):
         """
         Compute integral of base intensity between t_start and t_end for each variate.
@@ -309,7 +309,7 @@ class PoissonBase(torch.nn.Module, ABC):
 
         # Log learning rate
         self.logger.info(f"Parameters: lr={fit_config.learning_rate}")
-        optimizer = optim.Adam(self.parameters(), lr=fit_config.learning_rate)
+        optimizer = torch.optim.Adam(self.parameters(), lr=fit_config.learning_rate)
         losses = []
 
         self.logger.info("Starting training loop...")
@@ -385,6 +385,63 @@ class PoissonBase(torch.nn.Module, ABC):
         # Correct mathematical form: add integral term and sum over variates
         return (nll_events + nll_int.sum()) / seq.N
 
+    def penalty(self) -> float:
+        """Compute penalization for the model parameters."""
+
+        return 0.0
+
     @property
     def num_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+class PoissonCompound(PoissonBase):
+    def __init__(
+        self,
+        components: list[PoissonBase],
+        transformation=config.IDENTITY,
+        runtime_config=config.RuntimeConfig(),
+    ):
+        if not components:
+            raise ValueError("PoissonCompound requires at least one component.")
+
+        M = components[0].M
+        if not all(c.M == M for c in components):
+            raise ValueError("All components must have the same M.")
+
+        # Union of time bounds across components
+        t_start = torch.stack([c.t_start for c in components]).min(dim=0).values
+        t_end = torch.stack([c.t_end for c in components]).max(dim=0).values
+
+        # Use first component's transformation and runtime_config as canonical
+        super().__init__(
+            M=M,
+            t_start=t_start,
+            t_end=t_end,
+            transformation=components[0].t,
+            device=components[0].device,
+        )
+
+        self.components = nn.ModuleList(components)
+
+    def mu(self, t: torch.Tensor) -> torch.Tensor:
+        return sum(c.mu(t) for c in self.components)  # Shape: (N, M)
+
+    def report_parameters(self) -> str:
+        parts = []
+        for i, c in enumerate(self.components):
+            parts.append(
+                f"[Component {i}] {c.__class__.__name__}\n{c.report_parameters()}"
+            )
+        return "\n".join(parts)
+
+    def get_save_data(self) -> dict:
+        return {
+            f"component_{i}": c.get_save_data() for i, c in enumerate(self.components)
+        }
+
+    def __add__(self, other: PoissonBase) -> "PoissonCompound":
+        new_components = list(self.components) + (
+            list(other.components) if isinstance(other, PoissonCompound) else [other]
+        )
+        return PoissonCompound(new_components)
