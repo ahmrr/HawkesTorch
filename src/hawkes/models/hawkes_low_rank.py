@@ -1,8 +1,9 @@
 import math
 import torch
 import typing
+import torch.nn as nn
 
-from . import HawkesBase
+from . import HawkesBase, PoissonBase
 from ..utils import config
 
 
@@ -11,13 +12,14 @@ class HawkesLowRank(HawkesBase):
 
     def __init__(
         self,
-        M: int,
-        gamma: torch.Tensor,
         rank: int,
-        init_scale=0.1,
-        gamma_param=False,
+        gamma: torch.Tensor,
+        gamma_param: bool,
+        base_process: PoissonBase,
+        alpha_init: torch.Tensor | float | None = None,
         transformation=config.SOFTPLUS,
-        runtime_config=config.HawkesRuntimeConfig(),
+        runtime_config=config.RuntimeConfig(),
+        device: str | None = None,
     ):
         """
         Args:
@@ -34,16 +36,13 @@ class HawkesLowRank(HawkesBase):
             raise ValueError("gamma must be a rank-1 tensor")
 
         K = len(gamma)
-        self.device = gamma.device
 
-        super().__init__(M, K, device=self.device, runtime_config=runtime_config)
+        super().__init__(K, gamma_param, base_process, runtime_config, device)
 
         self.t = transformation
 
         if gamma_param:
-            self._inv_gamma = torch.nn.Parameter(
-                (self.t.inverse(gamma)).to(self.device)
-            )
+            self._inv_gamma = nn.Parameter((self.t.inverse(gamma)).to(self.device))
         else:
             self._inv_gamma = self.t.inverse(gamma)
 
@@ -51,16 +50,16 @@ class HawkesLowRank(HawkesBase):
         self.init_scale = torch.tensor([init_scale])
 
         # Initialize low-rank parameters
-        self._inv_mu = torch.nn.Parameter(
+        self._inv_mu = nn.Parameter(
             (self.t.inverse(self.init_scale) * torch.ones(M)).to(self.device)
         )
-        self._inv_alpha_diag = torch.nn.Parameter(
+        self._inv_alpha_diag = nn.Parameter(
             (self.t.inverse(self.init_scale) * torch.ones(K, M)).to(self.device)
         )  # Diagonal of alpha
-        self._inv_U = torch.nn.Parameter(
+        self._inv_U = nn.Parameter(
             (self.t.inverse(self.init_scale) * torch.ones(K, M, rank)).to(self.device)
         )
-        self._inv_V = torch.nn.Parameter(
+        self._inv_V = nn.Parameter(
             (self.t.inverse(self.init_scale) * torch.ones(K, rank, M)).to(self.device)
         )
 

@@ -7,10 +7,7 @@ from .. import utils
 from ..utils import config, _torch_scan
 
 # Need this for deterministic behavior in index_add_
-torch.use_deterministic_algorithms(True)
-
-
-# Intensity calculation based on parallel prefix scan
+# torch.use_deterministic_algorithms(True)
 
 
 class HawkesLogSumIntensity(torch.autograd.Function):
@@ -26,7 +23,8 @@ class HawkesLogSumIntensity(torch.autograd.Function):
         alpha: torch.Tensor,
         gamma: torch.Tensor,
         gamma_param: bool,
-        intensity_at_events_fun: Callable,
+        intensity_states_fn: Callable,
+        intensity_at_events_fn: Callable,
         batch_size: int,
     ):
         K = gamma.shape[0]
@@ -37,30 +35,27 @@ class HawkesLogSumIntensity(torch.autograd.Function):
         intensity_states_at_events = torch.empty(seq.N, 1, K, device=seq.ti.device)
 
         prev_state = None
-        for bs in range(0, seq.N, batch_size):
-            be = min(bs + batch_size, seq.N)
+        for batch_start in range(0, seq.N, batch_size):
+            batch_end = min(batch_start + batch_size, seq.N)
 
-            # TODO: Saving all states for backward is memory intensive
-            (
-                batch_intensity,
-                batch_states,
-                prev_state,
-            ) = intensity_at_events_fun(
+            batch_states, prev_state = intensity_states_fn(
                 seq,
-                batch_prev_state=prev_state,
-                batch_start=bs,
-                batch_end=be,
-                return_full_intensity=False,
-                return_last_state=True,
-                return_all_states=True,
+                bounds=(batch_start, batch_end),
+                prev_state=prev_state,
+                next_state=True,
+                full_states=False,
             )
 
-            intensity_at_events[bs:be] = batch_intensity
-            intensity_states_at_events[bs:be] = torch.gather(
-                batch_states, dim=1, index=seq.mi[bs:be, None, None].expand(-1, 1, K)
+            batch_intensity = intensity_at_events_fn(
+                seq,
+                states=batch_states,
+                full_intensity=False,
             )
 
-            # Sum log intensities (the log lambda term in NLL)
+            intensity_at_events[batch_start:batch_end] = batch_intensity
+            intensity_states_at_events[batch_start:batch_end] = batch_states
+
+            # Accumulate log intensities
             nll_logsum_term += torch.sum(torch.log(batch_intensity))
 
         # Save context for backward
@@ -141,7 +136,7 @@ class HawkesLogSumIntensity(torch.autograd.Function):
         if ctx.gamma_param:
             gamma_grad *= grad_output
 
-        return (None,) + (mu_grad, alpha_grad, gamma_grad) + (None,) * 8
+        return (None,) + (mu_grad, alpha_grad, gamma_grad) + (None,) * 9
 
 
 def _compute_alpha_grad(
@@ -182,8 +177,6 @@ def _compute_alpha_grad(
 
     # Transition matrices for the alpha-state recurrence
     M_alpha = torch.cat([exp_dti, exp_dti * e_mi], dim=2)  # Shape: [K, Nb, M+1]
-    # if alpha_prev_state is not None:
-    #     M_alpha = torch.cat([alpha_prev_state[:, None, :], M_alpha], dim=1)
     if alpha_prev_state is not None:
         M_alpha[:, 0:1, :] = _torch_scan.state_left_mult(
             alpha_prev_state[:, None, :], M_alpha[:, 0:1, :]
@@ -191,43 +184,15 @@ def _compute_alpha_grad(
 
     # Prefix scan to get cumulative products of transition matrices
     P_alpha = _torch_scan.prefix_scan(M_alpha, _torch_scan.state_left_mult, dim=1)
-    # if alpha_prev_state is not None:
-    #     P_alpha = _torch_scan.state_left_mult(
-    #         alpha_prev_state[:, None, :], P_alpha
-    #     )  # Shape: [K, Nb, M+1]
 
     alpha_states = P_alpha[:, -Nb:, 1:].permute(1, 2, 0)
     alpha_prev_state = P_alpha[:, -1, :]
 
-    # Sort events by their node index while preserving temporal order
-    # mi_sorted, idx = torch.sort(mi_b, stable=True)
-    # mi_counts = torch.bincount(mi_sorted, minlength=seq.M).tolist()
-
-    # Reorder ti, intensity, and alpha_states according to the sorted node indices
-    # Splitting yields per-node sequences (each subsequence remains time-ordered)
-    # ti_split = torch.split(
-    #     ti_b[:, idx, :], mi_counts, dim=1
-    # )  # Shape: [M, 1, Nq, 1]
-    # intensity_split = torch.split(
-    #     intensity_b[idx, None, None], mi_counts, dim=0
-    # )  # Shape: [M, Np, 1, 1]
-    # alpha_states_split = torch.split(
-    #     alpha_states[idx], mi_counts, dim=0
-    # )  # Shape: [M, Np, M, K]
-
     # Sum over events of each type
-    # TODO: This is nondeterminstic and adds rounding errors, cannot use now
     alpha_term = gamma * alpha_states / intensity_b[:, None, None]  # Shape: [Nb, M, K]
     alpha_grad = torch.zeros(seq.M, seq.M, K, device=seq.ti.device)
     alpha_grad.index_add_(0, mi_b, alpha_term)
     alpha_grad = alpha_grad.permute(2, 1, 0)  # Shape: [K, M, M]
-
-    # From the -log(lambda) term: sum over (gamma * state / lambda)
-    # alpha_grad_terms = [
-    #     (gamma * state_p / intensity_p).sum(dim=0)
-    #     for (state_p, intensity_p) in zip(alpha_states_split, intensity_split)
-    # ]
-    # alpha_grad = torch.stack(alpha_grad_terms, dim=0).permute(2, 1, 0)
 
     return alpha_grad, alpha_prev_state
 
@@ -285,18 +250,12 @@ def _compute_gamma_grad(
     M_gamma = torch.cat(
         [exp_dti, exp_dti * ti1 * alpha_mi], dim=2
     )  # Shape: [K, Nb, M+1]
-    # if gamma_prev_state is not None:
-    #     M_gamma = torch.cat([gamma_prev_state[:, None, :], M_gamma], dim=1)
     if gamma_prev_state is not None:
         M_gamma[:, 0:1, :] = _torch_scan.state_left_mult(
             gamma_prev_state[:, None, :], M_gamma[:, 0:1, :]
         )  # Shape: [K, Nb+1, M+1]
 
     P_gamma = _torch_scan.prefix_scan(M_gamma, _torch_scan.state_left_mult, dim=1)
-    # if gamma_prev_state is not None:
-    #     P_gamma = _torch_scan.state_left_mult(
-    #         gamma_prev_state[:, None, :], P_gamma
-    #     )  # Shape: [K, Nb, M+1]
 
     gamma_states = P_gamma[:, -Nb:, 1:].permute(1, 2, 0)
     gamma_prev_state = P_gamma[:, -1, :]
@@ -374,25 +333,10 @@ class HawkesIntegratedExcitation(torch.autograd.Function):
 
             ti_b, mi_b = seq.ti[bs:be], seq.mi[bs:be]
 
-            # # Sort events by their node index while preserving temporal order
-            # mi_sorted, idx = torch.sort(mi_b, stable=True)
-            # mi_counts = torch.bincount(mi_sorted, minlength=seq.M).tolist()
-
-            # ti_split = torch.split(ti_b[idx], mi_counts, dim=0)  # Shape: [M, Nq, 1]
-
             # Sum over events of each type
-            # TODO: This is nondeterminstic and adds rounding errors, cannot use now
             alpha_term = -torch.expm1(-gamma * (seq.T - ti_b[:, None]))
             alpha_exp_decay_sum = torch.zeros(seq.M, K, device=seq.ti.device)
             alpha_exp_decay_sum.index_add_(0, mi_b, alpha_term)  # Shape: [M, K]
-
-            # # Integral term alpha derivative
-            # alpha_exp_decay_sum = torch.stack(
-            #     [
-            #         -torch.expm1(-gamma * (seq.T - tiq[:, None])).sum(dim=0)
-            #         for tiq in ti_split
-            #     ]
-            # )  # Shape: [M, K]
 
             alpha_grad += alpha_exp_decay_sum.t()[..., None]
 
@@ -412,149 +356,3 @@ class HawkesIntegratedExcitation(torch.autograd.Function):
             gamma_grad *= grad_output
 
         return (None,) + (alpha_grad, gamma_grad) + (None,) * 2
-
-
-# Sequential intensity implementation for reference
-
-
-class HawkesLogSumIntensitySequential(torch.autograd.Function):
-    """
-    Computes log-sum intensity term in NLL and its derivatives using a sequential intensity recurrence.
-    """
-
-    @staticmethod
-    def forward(
-        ctx: Any,
-        seq: utils.EventSequence,
-        mu_at_events: torch.Tensor,
-        alpha: torch.Tensor,
-        gamma: torch.Tensor,
-        gamma_param: bool,
-        integrated_excitation: bool = False,
-    ):
-        K = gamma.shape[0]
-
-        nll_logsum_term = 0.0
-        nll_integral_term = 0.0
-
-        state = torch.zeros(K, seq.M, device=seq.ti.device)
-
-        for i in range(seq.N):
-            t, m = seq.ti[i], seq.mi[i]
-            dt = (t - seq.ti[i - 1]) if i > 0 else 0.0
-
-            exp_dt = torch.exp(-gamma * dt).unsqueeze(-1)
-            alphas = (
-                alpha[:, seq.mi[i - 1], :] if i > 0 else torch.zeros_like(alpha[:, 0])
-            )
-
-            state = exp_dt * state + exp_dt * alphas
-
-            excitation = torch.sum(gamma[:, None] * state, dim=0)
-            intensity = mu_at_events[i] + excitation[m]
-
-            nll_logsum_term += torch.log(intensity)
-
-            if integrated_excitation:
-                # 1 - e^{-γ_k (T - t_i)}
-                exp_term = -torch.expm1(-gamma[:, None] * (seq.T - t))
-                nll_integral_term += torch.sum(alpha[:, :, m] * exp_term)
-
-        # DEBUG
-        # print(nll_logsum_term)
-        # print(nll_integral_term)
-        # exit()
-
-        # Save context for backward
-        ctx.M, ctx.T = seq.M, seq.T
-        ctx.gamma_param = gamma_param
-        ctx.integrated_excitation = integrated_excitation
-        ctx.save_for_backward(
-            seq.ti,
-            seq.mi,
-            mu_at_events,
-            alpha,
-            gamma,
-        )
-
-        return nll_logsum_term - nll_integral_term
-
-    @staticmethod
-    def backward(ctx: Any, grad_output: torch.Tensor):
-        (
-            _ti_saved,
-            _mi_saved,
-            mu_at_events,
-            alpha,
-            gamma,
-        ) = ctx.saved_tensors
-        K = gamma.shape[0]
-
-        seq = utils.EventSequence(_ti_saved, _mi_saved, T=ctx.T, M=ctx.M)
-
-        mu_grad = torch.empty_like(mu_at_events)
-        alpha_grad = torch.zeros_like(alpha)
-        gamma_grad = torch.zeros_like(gamma) if ctx.gamma_param else None
-
-        intensity_state = torch.zeros(K, seq.M, device=seq.ti.device)
-        alpha_grad_state = torch.zeros(K, seq.M, device=seq.ti.device)
-        if ctx.gamma_param:
-            gamma_grad_state = torch.zeros(K, seq.M, device=seq.ti.device)
-
-        for i in range(seq.N):
-            t, m = seq.ti[i], seq.mi[i]
-            dt = (t - seq.ti[i - 1]) if i > 0 else 0.0
-
-            exp_dt = torch.exp(-gamma * dt).unsqueeze(-1)
-            alphas = (
-                alpha[:, seq.mi[i - 1], :] if i > 0 else torch.zeros_like(alpha[:, 0])
-            )
-
-            # R_i = e^{-γ Δt_i} R_{i-1} + e^{-γ Δt_i} α_{m_{i-1}}
-            intensity_state = exp_dt * intensity_state + exp_dt * alphas
-
-            intensity_excitation = torch.sum(gamma[:, None] * intensity_state, dim=0)
-            intensity = mu_at_events[i] + intensity_excitation[m]
-
-            # K_i = e^{-γ Δt_i} K_{i-1} + e^{-γ Δt_i} e_{m_{i-1}}
-            alpha_grad_state = exp_dt * alpha_grad_state
-            if i > 0:
-                alpha_grad_state[:, seq.mi[i - 1]] += exp_dt.squeeze(-1)
-
-            # L_i = e^{-γ Δt_i} L_{i-1} + t_{i-1} e^{-γ Δt_i} α_{m_{i-1}}
-            if ctx.gamma_param:
-                gamma_grad_state = (
-                    exp_dt * gamma_grad_state + seq.ti[i - 1] * exp_dt * alphas
-                )
-
-            alpha_grad_term = (
-                gamma[:, None] * alpha_grad_state / intensity
-            )  # Shape: [K, M]
-            alpha_grad[:, :, m] += alpha_grad_term
-
-            if ctx.gamma_param:
-                gamma_grad_term = (
-                    gamma * gamma_grad_state[:, m]
-                    + (1 - gamma * t) * intensity_state[:, m]
-                ) / intensity
-                gamma_grad += gamma_grad_term
-
-            # Gradient for mu depends only on intensities
-            mu_grad[i] = 1 / intensity
-
-            # Gradients for integrated excitation term
-            if ctx.integrated_excitation:
-                alpha_grad[:, m, :] -= 1 - torch.exp(-gamma[:, None] * (ctx.T - t))
-                gamma_grad -= torch.sum(
-                    (ctx.T - t)
-                    * alpha[:, m, :]
-                    * torch.exp(-gamma[:, None] * (ctx.T - t)),
-                    dim=1,
-                )
-
-        mu_grad *= grad_output
-        alpha_grad *= grad_output
-        if ctx.gamma_param:
-            gamma_grad *= grad_output
-
-        return (None,) + (mu_grad, alpha_grad, gamma_grad) + (None,) * 8

@@ -20,7 +20,7 @@ class EventSequence:
         # Compute defaults
         if self.M is None:
             self.M = int(self.mi.max().item()) + 1
-        if self.T is None:
+        if self.T is None or self.T == float("inf"):
             self.T = float(self.ti.max().item())
 
         self.N = self.ti.shape[0]
@@ -70,3 +70,32 @@ class EventSequence:
             f"EventSequence(N={self.N}, M={self.M}, T={self.T:.3f}, "
             f"device={self.ti.device}, dtype={self.ti.dtype})"
         )
+
+
+def norm_penalty(
+    param: torch.Tensor,
+    p: float = 1.0,
+    w: float = 0.0,
+    h: float = float("inf"),
+) -> float:
+    """
+    Helper function to compute norm penalty
+
+    Args:
+        param: The parameter tensor to regularize
+        p: The norm degree (default: 1.0 for L1, 2.0 for L2)
+        w: The weight of the penalty (default: 0.0)
+        h: The hinge threshold, so that param is penalized if it is below this threshold (default: 0.0, no hinge)
+    """
+
+    penalty = 0.0
+
+    if w > 0:
+        norm = torch.where(
+            param < h,
+            param.abs() ** p,
+            torch.zeros_like(param),
+        ).sum()
+        penalty += w * norm
+
+    return penalty

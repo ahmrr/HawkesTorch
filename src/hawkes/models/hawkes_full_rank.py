@@ -1,8 +1,9 @@
 import math
 import torch
 import typing
+import torch.nn as nn
 
-from . import HawkesBase
+from . import HawkesBase, HawkesPenalty, PoissonBase
 from ..utils import config, _torch_scan
 
 
@@ -11,19 +12,22 @@ class HawkesFullRank(HawkesBase):
 
     def __init__(
         self,
-        M: int,
         gamma: torch.Tensor,
-        init_scale=0.1,
-        gamma_param=False,
+        gamma_param: bool,
+        base_process: PoissonBase,
+        alpha_init: torch.Tensor | float | None = None,
+        penalization: HawkesPenalty = HawkesPenalty(),
         transformation=config.SOFTPLUS,
-        runtime_config=config.HawkesRuntimeConfig(),
+        runtime_config=config.RuntimeConfig(),
+        device: str | None = None,
     ):
         """
         Args:
             M: Number of nodes
             gamma: Initial or fixed (if gamma is parametrized or not, respectively) memory values for the exponential decay kernels
-            init_scale: Initial scale for all parameters
             gamma_param: Whether to parametrize gamma, the exponential kernel memory values
+            base_process: Base Poisson process for the Hawkes model
+            alpha_init: Initial scale for the excitation matrix (if float, all entries initialized to the same value)
             transformation: A mapping for the learned parameters, meaning the model learns the inverse values of the params
             runtime_config: Runtime configuration for debugging and profiling
         """
@@ -32,45 +36,27 @@ class HawkesFullRank(HawkesBase):
             raise ValueError("gamma must be a rank-1 tensor")
 
         K = len(gamma)
-        self.device = gamma.device
 
         super().__init__(
-            M,
-            K,
-            device=self.device,
-            runtime_config=runtime_config,
+            K, gamma_param, base_process, penalization, runtime_config, device
         )
 
         self.t = transformation
 
+        if alpha_init is None:
+            alpha_init = 0.01 + 0.09 * torch.rand(K, self.M, self.M).to(self.device)
+        elif isinstance(alpha_init, float):
+            alpha_init = alpha_init * torch.ones(K, self.M, self.M).to(self.device)
+
+        inv_gamma = self.t.inverse(gamma).to(self.device)
+        inv_alpha = self.t.inverse(alpha_init).to(self.device)
+
         if gamma_param:
-            self._inv_gamma = torch.nn.Parameter(
-                (self.t.inverse(gamma)).to(self.device)
-            )
+            self._inv_gamma = nn.Parameter(inv_gamma)
         else:
-            self._inv_gamma = self.t.inverse(gamma)
+            self._inv_gamma = inv_gamma
 
-        self.init_scale = torch.tensor([init_scale])
-
-        # Initialize low-rank parameters
-        self._inv_mu = torch.nn.Parameter(
-            (self.t.inverse(self.init_scale) * torch.ones(M)).to(self.device)
-        )
-        self._inv_alpha = torch.nn.Parameter(
-            (self.t.inverse(self.init_scale) * torch.ones(self.K, self.M, self.M)).to(
-                self.device
-            )
-        )
-
-    @property
-    def mu(self) -> torch.Tensor:
-        return self.t.forward(self._inv_mu)
-
-    @mu.setter
-    def mu(self, value: torch.Tensor | float):
-        self._inv_mu.data = self.t.inverse(
-            value * torch.ones_like(self._inv_mu).data.clone()
-        )
+        self._inv_alpha = nn.Parameter(inv_alpha)
 
     @property
     def alpha(self) -> torch.Tensor:
