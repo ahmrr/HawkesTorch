@@ -19,12 +19,4 @@ The only dependency for the library itself is `pytorch` alongside a working CUDA
 
 # Citation
 
-See [our paper]() for more details on the optimizations done for this library.
-
-To cite this project, please use the following BibTeX:
-
-```bibtex
-@inproceedings{
-
-}
-```
+See [our paper](https://arxiv.org/abs/2604.01342) for more details on the optimizations done for this library.

@@ -1,7 +1,7 @@
 __pycache__/
 
 examples/outputs/*
-!examples/outputs/plots/*
+# !examples/outputs/plots/*
 
 
 todo

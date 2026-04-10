@@ -9,9 +9,8 @@ from hawkes import models, utils
 def plot_intensity(
     seq: utils.EventSequence,
     model_sim: models.HawkesBase,
-    grid: int = 1000,
-    output: str | None = None,
     plot_events: bool = True,
+    grid: int = 1000,
 ):
     """
     Plot the intensity of a Hawkes process given an event sequence.
@@ -23,13 +22,12 @@ def plot_intensity(
         ti: Tensor of event times with shape (1, N, 1)
         mi: Tensor of event types with shape (N,)
         grid: Resolution of plot; i.e., how many times to plot the intensity for
-        output: Output location for the plot
         plot_events: Whether to mark the location of events on the plot
     """
 
     assert (
         seq.M == model_sim.M
-    ), "error: event sequence and sim model have different number of nodes"
+    ), "Event sequence and sim model must have the same number of nodes"
 
     t = torch.linspace(0, seq.ti.max(), grid, device=seq.ti.device)
     with torch.no_grad():
@@ -43,67 +41,81 @@ def plot_intensity(
     seq = seq.to("cpu")
     intensity_at_events = intensity_at_events.cpu()
 
-    fig, ax = plt.subplots(seq.M, 1, figsize=(9, seq.M), sharex=True, sharey=False)
-
-    for g in range(seq.M):
-        mask = seq.mi.squeeze() == g
-        times_g = seq.ti.squeeze()[mask]
-
-        if plot_events:
-            for eventt in times_g:
-                ax[g].axvline(eventt.item(), color="r", linestyle="-", linewidth=0.5)
-
-        ax[g].plot(t.squeeze(), t_intensity[:, g], label=f"{g}", linewidth=1)
-        # ax[g].plot(times_g, intensity[mask, g], ".")  # Experimental: plot event points
-        ax[g].set_xlim(0, seq.ti.max())
-        ax[g].set_ylim(0, torch.ceil(torch.max(intensity_at_events)))
-
-        if g > 0:
-            ax[g].set_yticklabels([])
-            ax[g].set_yticks([])
-
-        if g == seq.M - 1:
-            ax[g].set_xlabel("Time (arbitrary)")
-
-        ax[g].text(
-            0.01,
-            0.88,
-            g,
-            transform=ax[g].transAxes,
-            ha="left",
-            va="top",
-            bbox=dict(
-                facecolor="lightgray", edgecolor="black", boxstyle="round,pad=0.2"
-            ),
+    with plt.style.context("seaborn-v0_8-white"):
+        fig, axes = plt.subplots(
+            seq.M, 1, figsize=(9, seq.M), sharex=True, sharey=False
         )
 
-    fig.tight_layout()
-    fig.subplots_adjust(hspace=0)
-    fig.text(0.0, 0.5, "Intensity", va="center", rotation="vertical")
+        for g in range(seq.M):
+            mask = seq.mi.squeeze() == g
+            times_g = seq.ti.squeeze()[mask]
 
-    if output:
-        plt.savefig(output, dpi=300, bbox_inches="tight")
-    else:
-        plt.show()
+            if plot_events:
+                for eventt in times_g:
+                    axes[g].axvline(
+                        eventt.item(),
+                        color="r",
+                        linestyle="-",
+                        linewidth=0.5,
+                        alpha=0.25,
+                    )
 
-    plt.close(fig)
+            axes[g].plot(t.squeeze(), t_intensity[:, g], label=f"{g}", linewidth=1)
+            axes[g].set_xlim(0, seq.ti.max())
+            axes[g].set_ylim(0, torch.ceil(torch.max(intensity_at_events)))
+
+            if g > 0:
+                axes[g].set_yticklabels([])
+                axes[g].set_yticks([])
+
+            if g == seq.M - 1:
+                axes[g].set_xlabel("Time")
+
+            axes[g].text(
+                0.02,
+                0.88,
+                g,
+                transform=axes[g].transAxes,
+                ha="left",
+                va="top",
+                bbox=dict(
+                    facecolor="white",
+                    edgecolor="black",
+                    boxstyle="round,pad=0.4",
+                ),
+            )
+
+        fig.tight_layout()
+        fig.subplots_adjust(hspace=0)
+        fig.text(0.0, 0.5, "Intensity", va="center", rotation="vertical")
+
+        return fig, axes
 
 
-def plot_diagnostic(
+def plot_alpha(
+    alpha: torch.Tensor,
+):
+    K = alpha.shape[0]
+
+    with plt.style.context("seaborn-v0_8-white"):
+        fig, axes = plt.subplots(1, K, figsize=(8 * K, 6), squeeze=False)
+
+        for k in range(K):
+            vmin, vmax = 0, alpha[k].max().item()
+            im = axes[0, k].imshow(
+                alpha[k], aspect="auto", cmap="Reds", vmin=vmin, vmax=vmax
+            )
+            axes[0, k].set_title(f"Kernel {k+1}")
+            plt.colorbar(im, ax=axes[0, k])
+
+        return fig, axes
+
+
+def plot_alpha_comparison(
     true_alpha: torch.Tensor,
     estimated_alpha: torch.Tensor,
-    output: str | None = None,
 ):
-    """
-    A diagnostic plot comparing an arbitrarily chosen or known-to-be-true interaction matrix with a learned one.
-
-    Args:
-        true_alpha: The baseline interaction matrix
-        estimated_alpha: The comparison interaction matrix
-        output: Output location for the plot
-    """
-
-    # List of matplotlib's diverging colormaps
+    # List of diverging colormaps
     diverging_cmaps = {
         "PiYG",
         "PRGn",
@@ -119,118 +131,31 @@ def plot_diagnostic(
         "seismic",
     }
 
-    plt.style.use("seaborn-v0_8-white")
-    fig, axes = plt.subplots(1, 3, figsize=(24, 6))
+    with plt.style.context("seaborn-v0_8-white"):
+        fig, axes = plt.subplots(1, 3, figsize=(24, 6))
 
-    matrices = [
-        (true_alpha, "True Interaction Matrix", "Reds"),
-        (estimated_alpha, "Estimated Interaction Matrix", "Reds"),
-        (estimated_alpha - true_alpha, "Error", "seismic"),
-    ]
+        matrices = [
+            (true_alpha, "True Interaction Matrix", "Reds"),
+            (estimated_alpha, "Estimated Interaction Matrix", "Reds"),
+            (estimated_alpha - true_alpha, "Error", "seismic"),
+        ]
 
-    for ax, (matrix, title, cmap) in zip(axes, matrices):
-        cmap_ = plt.get_cmap(cmap).copy()
-        cmap_.set_bad("white")
-        if cmap in diverging_cmaps:
-            # For diverging colormaps, center at zero with symmetric limits
-            abs_max = max(abs(matrix.max()), abs(matrix.min()))
-            vmin, vmax = -abs_max, abs_max
-            heatmap = ax.imshow(matrix, cmap=cmap_, aspect="auto", vmin=vmin, vmax=vmax)
-        else:
-            heatmap = ax.imshow(matrix, cmap=cmap_, aspect="auto")
+        for ax, (matrix, title, cmap) in zip(axes, matrices):
+            cmap_ = plt.get_cmap(cmap).copy()
+            cmap_.set_bad("white")
+            if cmap in diverging_cmaps:
+                # For diverging colormaps, center at zero with symmetric limits
+                abs_max = max(abs(matrix.max()), abs(matrix.min()))
+                vmin, vmax = -abs_max, abs_max
+                heatmap = ax.imshow(
+                    matrix, cmap=cmap_, aspect="auto", vmin=vmin, vmax=vmax
+                )
+            else:
+                heatmap = ax.imshow(matrix, cmap=cmap_, aspect="auto")
 
-        ax.set_title(title)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        fig.colorbar(heatmap, ax=ax, fraction=0.046, pad=0.04)
+            ax.set_title(title)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            fig.colorbar(heatmap, ax=ax, fraction=0.046, pad=0.04)
 
-    if output:
-        plt.savefig(output, dpi=300, bbox_inches="tight")
-    else:
-        plt.show(fig)
-
-    plt.close(fig)
-
-
-def plot_residuals(
-    model,
-    model_sim,
-    T,
-    max_events,
-    num_simulations=10,
-    output: str | None = None,
-):
-    """
-    Simulate data from a simulation model and plot the residuals of a fitted model, and compare the residuals to that of a Poisson process.
-
-    Args:
-        model: The learned model
-        model_sim: The model to use for simulating data
-        T: End time of event sequence observation period
-        max_events: The maximum number of events to consider in the residual plot
-        num_simulations: number of simulation rounds to perform; i.e., number of calculated residual curves
-
-    [DOES NOT WORK]
-    """
-
-    # TODO: too much memory is used for plotting residuals
-
-    plt.figure(figsize=(8, 8))
-    plt.gca().set_aspect("equal", adjustable="box")
-
-    hawkes_rmse_list = []
-    poisson_rmse_list = []
-
-    for i in range(num_simulations):
-        seq_new = model_sim.simulate(T, max_events=max_events)
-        ts = torch.linspace(2, T, 100)
-        EN, N = [], []
-
-        for t in ts:
-            with torch.no_grad():
-                EN_t = model.integrated_intensity(t, seq_new.ti, seq_new.mi)
-                EN.append(EN_t)
-            N.append((seq_new.ti < t).sum().item())
-
-        EN = torch.stack(EN).cpu()
-        N = torch.tensor(N)
-
-        seq_new.cpu()
-
-        # Hawkes model residuals
-        resid_hawkes = EN - N
-        hawkes_rmse = (resid_hawkes**2).mean().sqrt().item()
-        hawkes_rmse_list.append(hawkes_rmse)
-        plt.plot(N, resid_hawkes, "r-", alpha=0.2)
-
-        # Poisson model residuals
-        lam0 = seq_new.N / T
-        N_poisson = lam0 * ts
-        resid_poisson = N_poisson - N
-        poisson_rmse = (resid_poisson**2).mean().sqrt().item()
-        poisson_rmse_list.append(poisson_rmse)
-        plt.plot(N, resid_poisson, "b-", alpha=0.2)
-
-    # Calculate average RMSE for both models
-    avg_hawkes_rmse = statistics.fmean(hawkes_rmse_list)
-    avg_poisson_rmse = statistics.fmean(poisson_rmse_list)
-
-    # Add legend with average RMSE
-    plt.plot([], [], "r-", label=f"Hawkes (Avg RMSE={avg_hawkes_rmse:.2f})")
-    plt.plot([], [], "b-", label=f"Poisson (Avg RMSE={avg_poisson_rmse:.2f})")
-
-    plt.xlabel("Observed " + r"$N(t)$")
-    plt.ylabel(r"$E[N(t)] - N(t)$")
-    plt.ylim(-500, 500)
-    plt.xlim(0, max(N))  # Set x-axis limit based on maximum observed events
-    plt.grid(True, linestyle="--", alpha=0.7)
-    plt.legend(loc="upper left")
-    plt.title(f"Residuals for {num_simulations} Simulations")
-    plt.tight_layout()
-
-    if output:
-        plt.savefig(output, dpi=300, bbox_inches="tight")
-    else:
-        plt.show()
-
-    plt.close()
+        return fig, axes
