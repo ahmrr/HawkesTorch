@@ -7,7 +7,7 @@ from ... import utils
 from ...utils import config, _torch_scan
 
 # Need this for deterministic behavior in index_add_
-torch.use_deterministic_algorithms(True)
+torch.use_deterministic_algorithms(False)
 
 
 class HawkesLogSumIntensity(torch.autograd.Function):

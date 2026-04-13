@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="https://arxiv.org/abs/2604.01342"><img src="https://img.shields.io/badge/arXiv-2604.01342-b31b1b.svg" alt="arXiv"></a>
-  <a href="https://github.com/ahmrr/hawkestorch/blob/main/LICENSE"><img src="https://img.shields.io/github/license/ahmrr/hawkestorch" alt="License"></a>
+  <a href="https://github.com/ahmrr/HawkesTorch/blob/main/LICENSE"><img src="https://img.shields.io/github/license/ahmrr/HawkesTorch" alt="License"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python"></a>
 </p>
 
@@ -14,25 +14,29 @@ A PyTorch library for learning multivariate Hawkes processes, with a focus on **
 
 This library is designed around **multivariate linear exponential Hawkes processes**, which have intensity functions of the form:
 ```math
-\lambda_p(t) = \textcolor{teal}{\mu_p(t)} + \sum_{j: t_j < t} \sum_{k=1}^K \textcolor{green}{\alpha_{p, m_j,k}}\textcolor{purple}{\gamma_k} e^{-\textcolor{purple}{\gamma_k}(t - t_j)}
+\lambda_p(t) = \textcolor{red}{\mu_p(t)} + \sum_{j: t_j < t} \sum_{k=1}^K \textcolor{green}{\alpha_{p, m_j,k}}\textcolor{blue}{\gamma_k} e^{-\textcolor{blue}{\gamma_k}(t - t_j)}
 ```
- - $\textcolor{teal}{\mu_p(t)}$ is the base intensity of node $p$ at time $t$ (a Poisson process)
- - $\textcolor{green}{\alpha_{p, q, k}}$ is the influence of node $q$ on node $p$ on timescale $k$
- - $\textcolor{purple}{\gamma_k}$ is the decay rate of timescale $k$
-
-and
-
-- $N$ is the number of **events** in the sequence
-- $M$ is the number of **dimensions** (nodes) in the process
-- $K$ is the number of **kernels** in the model (timescales of influence)
-- $t_i\in [0, T]$ is the time of the $i$-th event
-- $m_i\in \{1,\dots,M\}$ is the **dimension** (node type) of event $i$
-
-We implement a highly parallel algorithm for fitting Hawkes processes via **exact maximum likelihood estimation**. This allows scaling to massive datasets; e.g., $\sim 1,\!000$ nodes and $10,\!000,\!000$ events. Therefore, a GPU or many CPU cores are recommended to realize these speedups.
 
 <br>
 
-<figure>
+| Symbol | Description |
+|--------|-------------|
+| $\textcolor{red}{\mu_p(t)}$ | Base intensity of node $p$ at time $t$ (a Poisson process) |
+| $\textcolor{green}{\alpha_{p, q, k}}$ | Influence of node $q$ on node $p$ on timescale $k$ |
+| $\textcolor{blue}{\gamma_k}$ | Decay rate of timescale $k$ |
+| $N$ | Number of events in the sequence |
+| $M$ | Number of dimensions (nodes) in the process |
+| $K$ | Number of kernels (timescales of influence) |
+| $t_i \in [0, T]$ | Time of the $i$-th event |
+| $m_i \in \{1,\dots,M\}$ | Dimension (node type) of event $i$ |
+
+<br>
+
+We implement a highly parallel algorithm for fitting Hawkes processes via **exact maximum likelihood estimation**. This allows scaling to massive datasets; e.g., ~1,000 nodes and ~10,000,000 events. Therefore, a GPU or many CPU cores are recommended to realize these speedups.
+
+<br>
+
+<figure align="center">
 <img src="./docs/scaling_curves.png">
 <figcaption style="text-align: center;">
 
@@ -115,7 +119,7 @@ stats = est_model.fit(seq, fit_config) # returns dict of training details
 
 <br>
 
-<figure>
+<figure align="center">
 <img src="./docs/class_organization.png">
 <figcaption style="text-align: center;">
 
@@ -128,9 +132,9 @@ Arrows indicate inheritance, diamonds indicate composition.
 
 Most functionality is implemented in three main abstract base classes. Subclasses of these implement specific Hawkes and Poisson parameterizations and penalizations, which you can also extend to your own use cases.
 
-- `HawkesBase`: Provides intensity and likelihood computation, as well as `fit` and `simulate` methods. Subclasses implement custom parameterizations of $\textcolor{green}{\alpha_{p, q, k}}$ and $\textcolor{purple}{\gamma_k}$, e.g., low-rank, sparse, etc.
+- `HawkesBase`: Provides intensity and likelihood computation, as well as `fit` and `simulate` methods. Subclasses implement custom parameterizations of $\textcolor{green}{\alpha_{p, q, k}}$ and $\textcolor{blue}{\gamma_k}$, e.g., low-rank, sparse, etc.
 
-- `PoissonBase`: Represents the base rate $\textcolor{teal}{\mu_p(t)}$ and is used in `HawkesBase` via the `base_process` attribute. Also provides standalone `fit` and `simulate` methods, if raw Poisson fitting is desired. Subclasses implement custom parameterizations of the time-varying base rate.
+- `PoissonBase`: Represents the base rate $\textcolor{red}{\mu_p(t)}$ and is used in `HawkesBase` via the `base_process` attribute. Also provides standalone `fit` and `simulate` methods, if raw Poisson fitting is desired. Subclasses implement custom parameterizations of the time-varying base rate.
 
 - `Penalty`: An abstract `dataclass` that represents a regularization term added to the log-likelihood during fitting. Extend this to create custom penalties beyond those already implemented. Penalties are attached to a model via the `penalization` attribute, which accepts a `dataclass` that stores `Penalty` instances for each parameter.
 
@@ -152,7 +156,7 @@ There will be an [API Reference]() available soon with detailed documentation an
 
 - [ ] API documentation 
 
-If you encounter a bug or have a feature request, please feel free to [open an issue](https://github.com/ahmrr/hawkestorch/issues).
+If you encounter a bug or have a feature request, please feel free to [open an issue](https://github.com/ahmrr/hawkestorch/issues). Suggestions are also much appreciated!
 
 ## Citation
 
