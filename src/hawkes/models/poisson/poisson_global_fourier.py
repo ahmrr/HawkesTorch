@@ -7,31 +7,17 @@ import torch.nn as nn
 from dataclasses import dataclass
 
 from . import PoissonBase
+from ..penalty import Penalty
 from ... import utils
 from ...utils import config
 
 
 @dataclass
 class PoissonGlobalFourierPenalty:
-    l1_baseline: float = 0.0
-    l1_baseline_hinge: float = float("inf")
-    l2_baseline: float = 0.0
-    l2_baseline_hinge: float = float("inf")
-
-    l1_weight: float = 0.0
-    l1_weight_hinge: float = float("inf")
-    l2_weight: float = 0.0
-    l2_weight_hinge: float = float("inf")
-
-    l1_cosine: float = 0.0
-    l1_cosine_hinge: float = float("inf")
-    l2_cosine: float = 0.0
-    l2_cosine_hinge: float = float("inf")
-
-    l1_sine: float = 0.0
-    l1_sine_hinge: float = float("inf")
-    l2_sine: float = 0.0
-    l2_sine_hinge: float = float("inf")
+    baseline: Penalty | None = None
+    weight: Penalty | None = None
+    cosine: Penalty | None = None
+    sine: Penalty | None = None
 
 
 class PoissonGlobalFourier(PoissonBase):
@@ -46,19 +32,20 @@ class PoissonGlobalFourier(PoissonBase):
         fourier_init: torch.Tensor | None = None,
         t_start: torch.Tensor | float | None = None,
         t_end: torch.Tensor | float | None = None,
-        penalization=PoissonGlobalFourierPenalty(),
+        penalization: Penalty = PoissonGlobalFourierPenalty(),
         transformation=config.SOFTPLUS,
         runtime_config=config.RuntimeConfig(),
-        device: str = "cpu",
+        device: str | None = None,
     ):
-        super().__init__(M, t_start, t_end, transformation, runtime_config, device)
+        super().__init__(M, t_start, t_end, penalization, runtime_config, device)
 
-        self.penalization = penalization
+        self.t = transformation
+
         self.num_modes = num_modes
         self.T = T
 
         if r0_init is None:
-            r0_tensor = torch.randn(M, device=device) * 0.01
+            r0_tensor = torch.randn(M, device=device) * 0.1
         elif isinstance(r0_init, (int, float)):
             r0_tensor = torch.full((M,), float(r0_init), device=device)
         else:
@@ -84,8 +71,8 @@ class PoissonGlobalFourier(PoissonBase):
         self.w = nn.Parameter(w_tensor)
 
         if fourier_init is None:
-            a_init = torch.randn(num_modes, device=device) * 0.01
-            b_init = torch.randn(num_modes, device=device) * 0.01
+            a_init = torch.randn(num_modes, device=device) * 0.1
+            b_init = torch.randn(num_modes, device=device) * 0.1
         else:
             if fourier_init.shape != (2, num_modes):
                 raise ValueError(
@@ -125,51 +112,14 @@ class PoissonGlobalFourier(PoissonBase):
     def penalty(self) -> torch.Tensor:
         penalty = 0.0
 
-        penalty += utils.norm_penalty(
-            self.r0,
-            self.penalization.l1_baseline,
-            self.penalization.l1_baseline_hinge,
-            1.0,
-        )
-        penalty += utils.norm_penalty(
-            self.r0,
-            2.0,
-            self.penalization.l2_baseline,
-            self.penalization.l2_baseline_hinge,
-        )
-
-        penalty += utils.norm_penalty(
-            self.w, 1.0, self.penalization.l1_weight, self.penalization.l1_weight_hinge
-        )
-        penalty += utils.norm_penalty(
-            self.w, 2.0, self.penalization.l2_weight, self.penalization.l2_weight_hinge
-        )
-
-        penalty += utils.norm_penalty(
-            self.a_coeffs,
-            1.0,
-            self.penalization.l1_cosine,
-            self.penalization.l1_cosine_hinge,
-        )
-        penalty += utils.norm_penalty(
-            self.a_coeffs,
-            2.0,
-            self.penalization.l2_cosine,
-            self.penalization.l2_cosine_hinge,
-        )
-
-        penalty += utils.norm_penalty(
-            self.b_coeffs,
-            1.0,
-            self.penalization.l1_sine,
-            self.penalization.l1_sine_hinge,
-        )
-        penalty += utils.norm_penalty(
-            self.b_coeffs,
-            2.0,
-            self.penalization.l2_sine,
-            self.penalization.l2_sine_hinge,
-        )
+        if self.penalization.baseline is not None:
+            penalty += self.penalization.baseline(self.r0)
+        if self.penalization.weight is not None:
+            penalty += self.penalization.weight(self.w)
+        if self.penalization.cosine is not None:
+            penalty += self.penalization.cosine(self.a_coeffs)
+        if self.penalization.sine is not None:
+            penalty += self.penalization.sine(self.b_coeffs)
 
         return penalty
 
@@ -179,15 +129,7 @@ class PoissonGlobalFourier(PoissonBase):
         a_vals = self.a_coeffs.detach().cpu().numpy()
         b_vals = self.b_coeffs.detach().cpu().numpy()
 
-        report = "PoissonGlobalFourier parameters:\n"
-        report += f"  Period T:            {self.T}\n"
-        report += f"  Modes:               {self.num_modes}\n"
-        report += f"  r0 mean:             {r0_vals.mean():.4f}\n"
-        report += f"  w mean:              {w_vals.mean():.4f}\n"
-        report += f"  Cosine coeffs mean:  {a_vals.mean():.4f}\n"
-        report += f"  Sine coeffs mean:    {b_vals.mean():.4f}\n"
-
-        return report
+        return f"[r0_mean={r0_vals.mean():.4f}, weight_mean={w_vals.mean():.4f}, cosine_mean={a_vals.mean():.4f}, sine_mean={b_vals.mean():.4f}]"
 
     def get_save_data(self) -> dict:
         return {

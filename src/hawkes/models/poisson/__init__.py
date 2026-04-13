@@ -1,6 +1,7 @@
-from .poisson_base import PoissonBase
-from .poisson_constant import PoissonConstant
-from .poisson_piecewise import PoissonPiecewise
+from .poisson_base import PoissonBase, PoissonPenalty
+
+from .poisson import Poisson
+# from .poisson_piecewise import PoissonPiecewise
 from .poisson_fourier import (
     PoissonFourier,
     PoissonFourierPenalty,

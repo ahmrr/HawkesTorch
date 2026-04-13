@@ -4,10 +4,19 @@ import torch
 import typing
 import logging
 from typing import Self
+from dataclasses import dataclass
 from abc import ABC, abstractmethod
 
+from ..penalty import Penalty
 from ... import utils
 from ...utils import config
+
+
+@dataclass
+class PoissonPenalty:
+    """Penalization hyperparameters for Poisson process models."""
+
+    mu: Penalty | None = None
 
 
 class PoissonBase(torch.nn.Module, ABC):
@@ -18,7 +27,7 @@ class PoissonBase(torch.nn.Module, ABC):
         M: int,
         t_start: torch.Tensor | float | None = None,
         t_end: torch.Tensor | float | None = None,
-        transformation=config.SOFTPLUS,
+        penalization: Penalty = PoissonPenalty(),
         runtime_config=config.RuntimeConfig(),
         device: str | None = None,
     ):
@@ -27,7 +36,7 @@ class PoissonBase(torch.nn.Module, ABC):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.logger = logging.getLogger(__name__)
 
-        self.t = transformation
+        self.penalization = penalization
 
         # Set up time bounds for each variate
         if t_start is None:
@@ -102,11 +111,22 @@ class PoissonBase(torch.nn.Module, ABC):
 
         pass
 
+    def penalty(self) -> float:
+        """Compute penalization for the model parameters."""
+
+        penalty = 0.0
+
+        if self.penalization.mu is not None:
+            for param in self.parameters():
+                penalty += self.penalization.mu(param)
+
+        return penalty
+
     def integral_mu(
         self,
         t_start: torch.Tensor | float,
         t_end: torch.Tensor | float,
-        n_points: int = 100000,
+        n_points: int = 10000,
     ):
         """
         Compute integral of base intensity between t_start and t_end for each variate.
@@ -139,7 +159,7 @@ class PoissonBase(torch.nn.Module, ABC):
         mu_values = self.mu(t_points)  # Shape (n_points, M)
 
         # Trapezoidal integration
-        weights = torch.ones(n_points, device=self.device) * dt
+        weights = torch.ones(n_points, device=self.device)
         weights[0] *= 0.5
         weights[-1] *= 0.5
 
@@ -185,7 +205,7 @@ class PoissonBase(torch.nn.Module, ABC):
             total_intensities = intensities.sum(dim=1)  # Sum over variates
             max_intensity = total_intensities.max().item()
 
-        # Add 2% safety margin to handle sampling-based underestimation
+        # Add 20% safety margin to handle sampling-based underestimation
         return max_intensity * safety_multiplier
 
     @abstractmethod
@@ -233,7 +253,7 @@ class PoissonBase(torch.nn.Module, ABC):
             If no events are generated, returns empty tensors with appropriate shapes.
         """
 
-        sim_start, sim_end = self._simulation_bounds
+        sim_start, sim_end = self.simulation_bounds
         t = sim_start
         events_list = []
         types_list = []
@@ -386,17 +406,14 @@ class PoissonBase(torch.nn.Module, ABC):
         # Correct mathematical form: add integral term and sum over variates
         return (nll_events + nll_int.sum()) / seq.N
 
-    def penalty(self) -> float:
-        """Compute penalization for the model parameters."""
-
-        return 0.0
-
     @property
     def num_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
 class PoissonSum(PoissonBase):
+    """The sum of multiple PoissonBase components."""
+
     def __init__(
         self,
         components: list[PoissonBase],
@@ -423,18 +440,18 @@ class PoissonSum(PoissonBase):
             device=device,
         )
 
-        self.components = nn.ModuleList(components)
+        self.components = torch.nn.ModuleList(components)
 
     def mu(self, t: torch.Tensor) -> torch.Tensor:
         return sum(c.mu(t) for c in self.components)  # Shape: (N, M)
 
     def report_parameters(self) -> str:
-        parts = []
+        parts = ["μ_sum components:"]
         for i, c in enumerate(self.components):
             parts.append(
-                f"[Component {i}] {c.__class__.__name__}\n{c.report_parameters()}"
+                f"\n  component {i}: {c.__class__.__name__}\n{c.report_parameters()}"
             )
-        return "\n".join(parts)
+        return "".join(parts)
 
     def get_save_data(self) -> dict:
         return {
@@ -445,4 +462,9 @@ class PoissonSum(PoissonBase):
         new_components = list(self.components) + (
             list(other.components) if isinstance(other, PoissonSum) else [other]
         )
-        return PoissonSum(new_components)
+        return PoissonSum(
+            new_components,
+            transformation=self.t,
+            runtime_config=self.runtime_config,
+            device=self.device,
+        )

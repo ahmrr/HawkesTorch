@@ -11,7 +11,8 @@ from .hawkes_base import HawkesBase
 
 class HawkesBaseReference(HawkesBase, ABC):
     """
-    Reference implementation of Hawkes base class.
+    Reference implementation of Hawkes base class, containing alternative
+    implementations of the NLL and intensity (for testing only).
     """
 
     def fit(

@@ -44,7 +44,7 @@ class HawkesBase(torch.nn.Module, ABC):
         K: int,
         gamma_param: bool,
         base_process: PoissonBase,
-        penalization: HawkesPenalty = HawkesPenalty(),
+        penalization: Penalty = HawkesPenalty(),
         runtime_config: config.RuntimeConfig = config.RuntimeConfig(),
         device: str | None = None,
     ):
@@ -81,8 +81,6 @@ class HawkesBase(torch.nn.Module, ABC):
 
     def state_dict(self, *args, **kwargs):
         """Include the current computed alpha in the saved state dictionary."""
-
-        # TODO: update
 
         state_dict = super().state_dict(*args, **kwargs)
         # alpha may be a derived tensor in some subclasses; store its current value
@@ -251,6 +249,7 @@ class HawkesBase(torch.nn.Module, ABC):
         self.logger.info(f"Device: {self.device}, model params: {self.num_params:,}")
 
         optimizer = torch.optim.Adam(self.parameters(), lr=fit_config.learning_rate)
+        nlls = []
         losses = []
         epoch_times = []
 
@@ -282,6 +281,7 @@ class HawkesBase(torch.nn.Module, ABC):
 
             epoch_time_real = time.perf_counter() - epoch_time_real
 
+            nlls.append(nll.item())
             losses.append(loss.item())
             epoch_times.append(epoch_time_real)
 
@@ -297,7 +297,7 @@ class HawkesBase(torch.nn.Module, ABC):
 
                     self.logger.info(
                         f"Epoch {epoch + 1}/{fit_config.num_steps}: "
-                        f"Loss={full_nll.item():.4f}, "
+                        f"NLL={full_nll.item():.4f}, "
                         f"Sparsity={sparsity_factor:.3f}, "
                         f"α_mean={self.alpha.mean().item():.4f}, "
                         f"γ={'[' + ', '.join(f'{g:.2g}' for g in self.gamma.tolist()) + ']'}, "
@@ -338,6 +338,7 @@ class HawkesBase(torch.nn.Module, ABC):
         )
 
         return {
+            "nlls": nlls,
             "losses": losses,
             "epoch_times": epoch_times,
             "total_fit_time": total_fit_time,
@@ -591,7 +592,6 @@ class HawkesBase(torch.nn.Module, ABC):
             exp_decay * (states[:, :-1, :] + alpha_mi), dim=0
         )  # Shape: [N-1, M]
 
-        # TODO: Implement batched base rate integrals
         base_integrals = []
         for i in range(seq.N - 1):
             base_integral = self.base_process.integral_mu(

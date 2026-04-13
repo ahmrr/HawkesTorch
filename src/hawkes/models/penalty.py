@@ -12,8 +12,7 @@ class Penalty(ABC):
     Abstract base class for parameter penalties.
 
     Subclasses implement `compute(param)`, which returns the unweighted
-    penalty value. The base class handles weighting, early-exit on w=0,
-    and addition of same-type penalties.
+    penalty value; the base class handles weighting.
 
     The intended use is:
         penalty = SomePenalty(w=1e-3)
@@ -23,11 +22,11 @@ class Penalty(ABC):
     weight: float = 0.0
 
     @abstractmethod
-    def compute(self, param: torch.Tensor) -> torch.Tensor:
+    def compute(self, param: torch.Tensor) -> float:
         """Unweighted penalty value."""
         ...
 
-    def __call__(self, param: torch.Tensor) -> torch.Tensor:
+    def __call__(self, param: torch.Tensor) -> float:
         if self.weight == 0:
             return torch.tensor(0.0, device=param.device)
         return self.weight * self.compute(param)
@@ -45,7 +44,7 @@ class SumPenalty(Penalty):
     penalties: list[Penalty] = field(default_factory=list)
     weight: float = 1.0  # global rescaling; usually left at 1.0
 
-    def compute(self, param: torch.Tensor) -> torch.Tensor:
+    def compute(self, param: torch.Tensor) -> float:
         return sum(p(param) for p in self.penalties)
 
     def __add__(self, other):
@@ -74,24 +73,23 @@ class NormPenalty(Penalty):
         NormPenalty("nuc", weight=1e-4, dim=(0,1))
     """
 
-    order: int | float | str = 2
-    weight: float = 0.0
+    order: int | float | str = 1
     hinge: float = float("inf")
     kwargs: dict = field(default_factory=dict)
 
-    def compute(self, param: torch.Tensor) -> torch.Tensor:
+    def compute(self, param: torch.Tensor) -> float:
         param_abs = param.abs()
-        clipped = torch.where(
+        param_clipped = torch.where(
             param_abs < self.hinge, param_abs, torch.zeros_like(param)
         )
         match self.order:
             case "inf":
-                return clipped.max()
+                return param_clipped.max().item()
             case "nuc":
                 dim = self.kwargs.get("dim", self._infer_matrix_dim(param))
-                return torch.linalg.matrix_norm(param, ord="nuc", dim=dim).sum()
+                return torch.linalg.matrix_norm(param, ord="nuc", dim=dim).sum().item()
             case _ if isinstance(self.order, (int, float)):
-                return clipped.pow(self.order).sum()
+                return param_clipped.pow(self.order).sum().item()
             case _:
                 raise ValueError(f"Unsupported norm type: {self.order!r}")
 
@@ -104,17 +102,17 @@ class NormPenalty(Penalty):
 
 def L1Penalty(weight: float = 0.0, hinge: float = float("inf")) -> NormPenalty:
     """L1 norm penalty."""
-    return NormPenalty(1, weight, hinge)
+    return NormPenalty(order=1, weight=weight, hinge=hinge)
 
 
 def L2Penalty(weight: float = 0.0, hinge: float = float("inf")) -> NormPenalty:
     """L2 norm penalty."""
-    return NormPenalty(2, weight, hinge)
+    return NormPenalty(order=2, weight=weight, hinge=hinge)
 
 
 def MaxPenalty(weight: float = 0.0, hinge: float = float("inf")) -> NormPenalty:
     """Max-norm penalty."""
-    return NormPenalty("inf", weight, hinge)
+    return NormPenalty(order="inf", weight=weight, hinge=hinge)
 
 
 def NuclearPenalty(
@@ -122,4 +120,4 @@ def NuclearPenalty(
 ) -> NormPenalty:
     """Nuclear norm penalty."""
     kwargs = {"dim": dim} if dim is not None else {}
-    return NormPenalty("nuc", weight, float("inf"), kwargs=kwargs)
+    return NormPenalty(order="nuc", weight=weight, hinge=float("inf"), kwargs=kwargs)

@@ -9,8 +9,9 @@ from hawkes import models, utils
 def plot_intensity(
     seq: utils.EventSequence,
     model_sim: models.HawkesBase,
+    dimensions: list[int] | None = None,
     plot_events: bool = True,
-    grid: int = 1000,
+    grid: int = 10000,
 ):
     """
     Plot the intensity of a Hawkes process given an event sequence.
@@ -24,6 +25,9 @@ def plot_intensity(
         grid: Resolution of plot; i.e., how many times to plot the intensity for
         plot_events: Whether to mark the location of events on the plot
     """
+
+    if dimensions is None:
+        dimensions = list(range(seq.M))
 
     assert (
         seq.M == model_sim.M
@@ -42,12 +46,13 @@ def plot_intensity(
     intensity_at_events = intensity_at_events.cpu()
 
     with plt.style.context("seaborn-v0_8-white"):
+        n_plots = len(dimensions)
         fig, axes = plt.subplots(
-            seq.M, 1, figsize=(9, seq.M), sharex=True, sharey=False
+            n_plots, 1, figsize=(9, n_plots), sharex=True, sharey=False
         )
 
-        for g in range(seq.M):
-            mask = seq.mi.squeeze() == g
+        for g in range(n_plots):
+            mask = seq.mi.squeeze() == dimensions[g]
             times_g = seq.ti.squeeze()[mask]
 
             if plot_events:
@@ -60,7 +65,12 @@ def plot_intensity(
                         alpha=0.25,
                     )
 
-            axes[g].plot(t.squeeze(), t_intensity[:, g], label=f"{g}", linewidth=1)
+            axes[g].plot(
+                t.squeeze(),
+                t_intensity[:, dimensions[g]],
+                label=f"{dimensions[g]+1}",
+                linewidth=1,
+            )
             axes[g].set_xlim(0, seq.ti.max())
             axes[g].set_ylim(0, torch.ceil(torch.max(intensity_at_events)))
 
@@ -68,20 +78,20 @@ def plot_intensity(
                 axes[g].set_yticklabels([])
                 axes[g].set_yticks([])
 
-            if g == seq.M - 1:
+            if g == n_plots - 1:
                 axes[g].set_xlabel("Time")
 
             axes[g].text(
                 0.02,
-                0.88,
-                g,
+                0.85,
+                dimensions[g],
                 transform=axes[g].transAxes,
                 ha="left",
                 va="top",
                 bbox=dict(
                     facecolor="white",
                     edgecolor="black",
-                    boxstyle="round,pad=0.4",
+                    boxstyle="round,pad=0.3",
                 ),
             )
 

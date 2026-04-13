@@ -7,6 +7,7 @@ import torch.nn as nn
 from dataclasses import dataclass
 
 from . import PoissonBase
+from ..penalty import Penalty
 from ... import utils
 from ...utils import config
 
@@ -14,37 +15,12 @@ from ...utils import config
 @dataclass
 class PoissonFourierPenalty:
     """
-    Penalization hyperparameters for the FourierSeriesPoisson model.
-
-    Attributes:
-        l1_baseline (float): L1 penalty weight for baseline values.
-        l1_baseline_hinge (float): Threshold below which baseline values are penalized.
-        l2_baseline (float): L2 penalty weight for baseline values.
-        l2_baseline_hinge (float): Threshold below which baseline values are penalized.
-        l1_cosine (float): L1 penalty weight for cosine coefficients.
-        l1_cosine_hinge (float): Threshold below which cosine coefficients are penalized.
-        l2_cosine (float): L2 penalty weight for cosine coefficients.
-        l2_cosine_hinge (float): Threshold below which cosine coefficients are penalized.
-        l1_sine (float): L1 penalty weight for sine coefficients.
-        l1_sine_hinge (float): Threshold below which sine coefficients are penalized.
-        l2_sine (float): L2 penalty weight for sine coefficients.
-        l2_sine_hinge (float): Threshold below which sine coefficients are penalized.
+    Penalization hyperparameters for the PoissonFourier model.
     """
 
-    l1_baseline: float = 0.0
-    l1_baseline_hinge: float = float("inf")
-    l2_baseline: float = 0.0
-    l2_baseline_hinge: float = float("inf")
-
-    l1_cosine: float = 0.0
-    l1_cosine_hinge: float = float("inf")
-    l2_cosine: float = 0.0
-    l2_cosine_hinge: float = float("inf")
-
-    l1_sine: float = 0.0
-    l1_sine_hinge: float = float("inf")
-    l2_sine: float = 0.0
-    l2_sine_hinge: float = float("inf")
+    baseline: Penalty | None = None
+    cosine: Penalty | None = None
+    sine: Penalty | None = None
 
 
 class PoissonFourier(PoissonBase):
@@ -67,7 +43,7 @@ class PoissonFourier(PoissonBase):
         device: str = "cpu",
     ):
         """
-        Initialize a FourierSeriesPoisson process with periodic intensity modeled by Fourier series.
+        Initialize a PoissonFourier process with periodic intensity modeled by Fourier series.
 
         This class models a multivariate Poisson process where each variate has time-varying
         intensity following a periodic pattern. The intensity for variate m at time t is:
@@ -127,7 +103,7 @@ class PoissonFourier(PoissonBase):
 
         Examples:
             >>> # Simple periodic process with 3 variates, 2 modes, period 24 hours
-            >>> model = FourierSeriesPoisson(
+            >>> model = PoissonFourier(
             ...     M=3,
             ...     num_modes=2,
             ...     T=24.0,
@@ -137,7 +113,7 @@ class PoissonFourier(PoissonBase):
             >>> # Complex model with different baselines and custom Fourier coefficients
             >>> fourier_coeffs = torch.zeros(4, 2, 3)  # 4 variates, 3 modes
             >>> fourier_coeffs[:, 0, 0] = torch.tensor([1.0, 0.5, -0.3, 0.8])  # First cosine mode
-            >>> model = FourierSeriesPoisson(
+            >>> model = PoissonFourier(
             ...     M=4,
             ...     num_modes=3,
             ...     T=12.0,
@@ -147,7 +123,7 @@ class PoissonFourier(PoissonBase):
             ... )
 
             >>> # Daily pattern with different activity windows
-            >>> model = FourierSeriesPoisson(
+            >>> model = PoissonFourier(
             ...     M=2,
             ...     num_modes=4,
             ...     T=24.0,  # 24-hour period
@@ -161,9 +137,9 @@ class PoissonFourier(PoissonBase):
             - Fourier coefficients are learned parameters that will be optimized during fitting
             - Use activation="softplus" for smooth intensities, "exp" for sharper transitions
         """
-        super().__init__(M, t_start, t_end, transformation, runtime_config, device)
+        super().__init__(M, t_start, t_end, penalization, runtime_config, device)
 
-        self.penalization = penalization
+        self.t = transformation
 
         self.num_modes = num_modes
         self.T = T
@@ -259,59 +235,12 @@ class PoissonFourier(PoissonBase):
 
         penalty = 0.0
 
-        # L1 penalty on baseline r0
-        if self.penalization.l1_baseline > 0:
-            l1_baseline = torch.where(
-                self.r0.abs() < self.penalization.l1_baseline_hinge,
-                self.r0.abs(),
-                torch.zeros_like(self.r0),
-            ).sum()
-            penalty += self.penalization.l1_baseline * l1_baseline
-
-        # L2 penalty on baseline r0
-        if self.penalization.l2_baseline > 0:
-            l2_baseline = torch.where(
-                self.r0.abs() < self.penalization.l2_baseline_hinge,
-                self.r0.pow(2),
-                torch.zeros_like(self.r0),
-            ).sum()
-            penalty += self.penalization.l2_baseline * l2_baseline
-
-        # L1 penalty on cosine coefficients
-        if self.penalization.l1_cosine > 0:
-            l1_cosine = torch.where(
-                self.a_coeffs.abs() < self.penalization.l1_cosine_hinge,
-                self.a_coeffs.abs(),
-                torch.zeros_like(self.a_coeffs),
-            ).sum()
-            penalty += self.penalization.l1_cosine * l1_cosine
-
-        # L2 penalty on cosine coefficients
-        if self.penalization.l2_cosine > 0:
-            l2_cosine = torch.where(
-                self.a_coeffs.abs() < self.penalization.l2_cosine_hinge,
-                self.a_coeffs.pow(2),
-                torch.zeros_like(self.a_coeffs),
-            ).sum()
-            penalty += self.penalization.l2_cosine * l2_cosine
-
-        # L1 penalty on sine coefficients
-        if self.penalization.l1_sine > 0:
-            l1_sine = torch.where(
-                self.b_coeffs.abs() < self.penalization.l1_sine_hinge,
-                self.b_coeffs.abs(),
-                torch.zeros_like(self.b_coeffs),
-            ).sum()
-            penalty += self.penalization.l1_sine * l1_sine
-
-        # L2 penalty on sine coefficients
-        if self.penalization.l2_sine > 0:
-            l2_sine = torch.where(
-                self.b_coeffs.abs() < self.penalization.l2_sine_hinge,
-                self.b_coeffs.pow(2),
-                torch.zeros_like(self.b_coeffs),
-            ).sum()
-            penalty += self.penalization.l2_sine * l2_sine
+        if self.penalization.baseline is not None:
+            penalty += self.penalization.baseline(self.r0)
+        if self.penalization.cosine is not None:
+            penalty += self.penalization.cosine(self.a_coeffs)
+        if self.penalization.sine is not None:
+            penalty += self.penalization.sine(self.b_coeffs)
 
         return penalty
 
@@ -323,14 +252,11 @@ class PoissonFourier(PoissonBase):
         a_vals = self.a_coeffs.detach().cpu().numpy()
         b_vals = self.b_coeffs.detach().cpu().numpy()
 
-        report = f"FourierSeriesPoisson parameters:\n"
-        report += f"  Period T: {self.T}\n"
-        report += f"  Modes: {self.num_modes}\n"
-        report += f"  r0 mean: {r0_vals.mean()}\n"
-        report += f"  Cosine coeffs mean: {a_vals.mean()}\n"
-        report += f"  Sine coeffs mean: {b_vals.mean()}\n"
-
-        return report
+        return (
+            f"r0_mean={r0_vals.mean():.4f}, "
+            f"cosine_mean={a_vals.mean():.4f}, "
+            f"sine_mean={b_vals.mean():.4f}"
+        )
 
     def get_save_data(self) -> dict:
         """

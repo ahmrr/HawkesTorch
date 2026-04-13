@@ -1,7 +1,7 @@
 from .poisson import (
     PoissonBase,
-    PoissonConstant,
-    PoissonPiecewise,
+    Poisson,
+    # PoissonPiecewise,
     PoissonFourier,
     PoissonFourierPenalty,
     PoissonGlobalFourier,
@@ -11,9 +11,8 @@ from .poisson import (
 from .hawkes import (
     HawkesBase,
     HawkesPenalty,
-    HawkesFullRank,
+    Hawkes,
     HawkesLowRank,
-    HawkesUpperTriangular,
 )
 
 from .penalty import (

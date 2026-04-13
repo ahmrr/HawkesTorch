@@ -4,12 +4,13 @@ import typing
 import torch.nn as nn
 
 from . import HawkesBase, HawkesPenalty
+from ..penalty import Penalty
 from ..poisson import PoissonBase
-from ...utils import config, _torch_scan
+from ...utils import config
 
 
-class HawkesFullRank(HawkesBase):
-    """Standard full-rank Hawkes process implementation."""
+class Hawkes(HawkesBase):
+    """Standard Hawkes process implementation."""
 
     def __init__(
         self,
@@ -49,30 +50,26 @@ class HawkesFullRank(HawkesBase):
         elif isinstance(alpha_init, float):
             alpha_init = alpha_init * torch.ones(K, self.M, self.M).to(self.device)
 
-        inv_gamma = self.t.inverse(gamma).to(self.device)
-        inv_alpha = self.t.inverse(alpha_init).to(self.device)
+        _gamma = self.t.inverse(gamma).to(self.device)
+        _alpha = self.t.inverse(alpha_init).to(self.device)
 
-        if gamma_param:
-            self._inv_gamma = nn.Parameter(inv_gamma)
-        else:
-            self._inv_gamma = inv_gamma
-
-        self._inv_alpha = nn.Parameter(inv_alpha)
+        self._gamma = nn.Parameter(_gamma) if gamma_param else _gamma
+        self._alpha = nn.Parameter(_alpha)
 
     @property
     def alpha(self) -> torch.Tensor:
-        return self.t.forward(self._inv_alpha)
+        return self.t.forward(self._alpha)
 
     @alpha.setter
     def alpha(self, value: torch.Tensor | float):
-        self._inv_alpha.data = self.t.inverse(
-            value * torch.ones_like(self._inv_alpha).data.clone()
+        self._alpha.data = self.t.inverse(
+            value * torch.ones_like(self._alpha).data.clone()
         )
 
     @property
     def gamma(self) -> torch.Tensor:
-        return self.t.forward(self._inv_gamma)
+        return self.t.forward(self._gamma)
 
     @gamma.setter
     def gamma(self, value: torch.Tensor):
-        self._inv_gamma.data = self.t.inverse(value)
+        self._gamma.data = self.t.inverse(value)

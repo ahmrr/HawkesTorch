@@ -4,36 +4,73 @@ import torch
 import typing
 import logging
 
-from . import PoissonBase
+from . import PoissonBase, PoissonPenalty
+from ..penalty import Penalty
 from ... import utils
 from ...utils import config
 
 
-class PoissonPiecewise(PoissonBase):
+class Poisson(PoissonBase):
     """
-    Piecewise-constant Poisson process implementation.
+    Homogeneous (constant) Poisson process implementation.
     """
 
     def __init__(
         self,
         M: int,
-        bins: int,
         mu_init: torch.Tensor | float | None = None,
         t_start: torch.Tensor | float | None = None,
         t_end: torch.Tensor | float | None = None,
+        penalization: Penalty = PoissonPenalty(),
         transformation=config.SOFTPLUS,
         runtime_config=config.RuntimeConfig(),
         device: str | None = None,
     ):
         """
-        Initialize a piecewise-constant Poisson process with varying intensity rates.
+        Initialize a homogeneous Poisson process with constant intensity rates.
+
+        This class models a multivariate Poisson process where each variate has a constant
+        intensity rate over time. The intensity for variate m is: μ_m = activation(raw_mu_m),
+        where raw_mu_m is the learnable parameter.
+
+        Args:
+            M: Number of variates (event types) in the process
+            mu_init: Initial intensity values for each variate. If None, random initialization in [0.1, 2.1] is used.
+            t_start: Start times for each variate's activity window. If None, defaults to 0 for all variates.
+            t_end: End times for each variate's activity window. If None, defaults to infinity for all variates.
+            transformation: A mapping for the learned parameters, meaning the model learns the inverse values of the params
+            runtime_config: Runtime configuration for debugging and profiling
+            device: PyTorch device for computation ("cpu" or "cuda")
+
+        Raises:
+            ValueError: If mu_init tensor has wrong shape
+
+        Example:
+            >>> # Simple case: 3 variates, same initial intensity
+            >>> model = HomogeneousPoisson(M=3, mu_init=2.0)
+
+            >>> # Different intensities per variate
+            >>> model = HomogeneousPoisson(
+            ...     M=3,
+            ...     mu_init=torch.tensor([1.0, 2.0, 1.5]),
+            ...     device="cuda"
+            ... )
+
+            >>> # With time windows
+            >>> model = HomogeneousPoisson(
+            ...     M=2,
+            ...     t_start=[0.0, 10.0],  # Variate 1 starts at t=10
+            ...     t_end=[100.0, 80.0]   # Variate 1 ends earlier
+            ... )
         """
 
-        super().__init__(M, t_start, t_end, transformation, runtime_config, device)
+        super().__init__(M, t_start, t_end, penalization, runtime_config, device)
+
+        self.t = transformation
 
         if mu_init is None:
-            # Create random initial mu values (positive values) in [0.1, 2.0]
-            mu_init_tensor = torch.rand(M, device=device) * 2.0 + 0.1
+            # Create random initial mu values (positive values)
+            mu_init_tensor = torch.rand(M, device=device) * 0.1
         elif isinstance(mu_init, (int, float)):
             mu_init_tensor = torch.full((M,), float(mu_init), device=device)
         else:
