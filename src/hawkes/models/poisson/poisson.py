@@ -70,7 +70,9 @@ class Poisson(PoissonBase):
 
         if mu_init is None:
             # Create random initial mu values (positive values)
-            mu_init_tensor = torch.rand(M, device=device) * 0.1
+            mu_init_tensor = (
+                torch.rand(M, device=device) * 0.1
+            )  # Random values in [0, 0.1]
         elif isinstance(mu_init, (int, float)):
             mu_init_tensor = torch.full((M,), float(mu_init), device=device)
         else:
@@ -82,13 +84,13 @@ class Poisson(PoissonBase):
             )
 
         # Store raw parameters (will be transformed via activation)
-        self.raw_mu = torch.nn.Parameter(self.t.inverse(mu_init_tensor))
+        self._mu = torch.nn.Parameter(self.t.inverse(mu_init_tensor))
 
     @property
     def mu_values(self) -> torch.Tensor:
         """Get the current intensity values (always positive via activation)"""
 
-        return self.t.forward(self.raw_mu)
+        return self.t.forward(self._mu)
 
     def mu(self, t: torch.Tensor) -> torch.Tensor:
         """

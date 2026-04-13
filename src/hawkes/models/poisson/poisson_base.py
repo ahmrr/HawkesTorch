@@ -33,7 +33,7 @@ class PoissonBase(torch.nn.Module, ABC):
     ):
         super().__init__()
         self.M = M
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or torch.get_default_device()
         self.logger = logging.getLogger(__name__)
 
         self.penalization = penalization

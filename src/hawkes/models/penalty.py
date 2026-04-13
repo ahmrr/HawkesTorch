@@ -22,11 +22,11 @@ class Penalty(ABC):
     weight: float = 0.0
 
     @abstractmethod
-    def compute(self, param: torch.Tensor) -> float:
+    def compute(self, param: torch.Tensor) -> torch.Tensor:
         """Unweighted penalty value."""
         ...
 
-    def __call__(self, param: torch.Tensor) -> float:
+    def __call__(self, param: torch.Tensor) -> torch.Tensor:
         if self.weight == 0:
             return torch.tensor(0.0, device=param.device)
         return self.weight * self.compute(param)
@@ -44,7 +44,7 @@ class SumPenalty(Penalty):
     penalties: list[Penalty] = field(default_factory=list)
     weight: float = 1.0  # global rescaling; usually left at 1.0
 
-    def compute(self, param: torch.Tensor) -> float:
+    def compute(self, param: torch.Tensor) -> torch.Tensor:
         return sum(p(param) for p in self.penalties)
 
     def __add__(self, other):
@@ -77,19 +77,19 @@ class NormPenalty(Penalty):
     hinge: float = float("inf")
     kwargs: dict = field(default_factory=dict)
 
-    def compute(self, param: torch.Tensor) -> float:
+    def compute(self, param: torch.Tensor) -> torch.Tensor:
         param_abs = param.abs()
         param_clipped = torch.where(
             param_abs < self.hinge, param_abs, torch.zeros_like(param)
         )
         match self.order:
             case "inf":
-                return param_clipped.max().item()
+                return param_clipped.max()
             case "nuc":
                 dim = self.kwargs.get("dim", self._infer_matrix_dim(param))
-                return torch.linalg.matrix_norm(param, ord="nuc", dim=dim).sum().item()
+                return torch.linalg.matrix_norm(param, ord="nuc", dim=dim).sum()
             case _ if isinstance(self.order, (int, float)):
-                return param_clipped.pow(self.order).sum().item()
+                return param_clipped.pow(self.order).sum()
             case _:
                 raise ValueError(f"Unsupported norm type: {self.order!r}")
 
