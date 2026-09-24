@@ -1,7 +1,8 @@
 from .poisson import (
     PoissonBase,
     Poisson,
-    # PoissonPiecewise,
+    PoissonPiecewise,
+    PoissonPiecewisePenalty,
     PoissonFourier,
     PoissonFourierPenalty,
     PoissonGlobalFourier,
