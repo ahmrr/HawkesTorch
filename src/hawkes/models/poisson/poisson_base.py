@@ -436,14 +436,34 @@ class PoissonSum(PoissonBase):
             M=M,
             t_start=t_start,
             t_end=t_end,
-            transformation=transformation,
+            runtime_config=runtime_config,
             device=device,
         )
+
+        # PoissonBase does not store these; __add__ needs them to build a new sum
+        self.t = transformation
+        self.runtime_config = runtime_config
 
         self.components = torch.nn.ModuleList(components)
 
     def mu(self, t: torch.Tensor) -> torch.Tensor:
         return sum(c.mu(t) for c in self.components)  # Shape: (N, M)
+
+    def integral_mu(
+        self, t_start: torch.Tensor | float, t_end: torch.Tensor | float
+    ) -> torch.Tensor:
+        """
+        Integral of the summed intensity, delegated to each component.
+
+        Components with a closed-form integral (e.g. Poisson) stay exact and see
+        the per-variate intervals unchanged; only components without one fall
+        back to the numerical integration in PoissonBase.
+        """
+        return sum(c.integral_mu(t_start, t_end) for c in self.components)
+
+    def penalty(self) -> float:
+        """Sum of the components' own penalties (e.g. smoothness on a piecewise rate)."""
+        return sum(c.penalty() for c in self.components)
 
     def report_parameters(self) -> str:
         parts = ["μ_sum components:"]
