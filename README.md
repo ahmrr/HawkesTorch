@@ -142,7 +142,7 @@ Most functionality is implemented in three main abstract base classes. Subclasse
 To implement your own Hawkes or Poisson process, or to add custom penalization, please reference:
 - Files in `examples/templates` for templates you can copy and modify. 
 - The `HawkesBase`, `PoissonBase`, and `Penalty` base classes for core methods that are already implemented.
-- The `Hawkes`, `HawkesLowRank`, `Poisson`, `PoissonFourier`, and `NormPenalty` subclasses for concrete implementation examples.
+- The `Hawkes`, `HawkesLowRank`, `Poisson`, `PoissonPiecewise`, `PoissonFourier`, and `NormPenalty` subclasses for concrete implementation examples.
 
 ## Documentation
 
@@ -152,7 +152,9 @@ There will be an [API Reference]() available soon with detailed documentation an
 
 - [ ] Even faster likelihood computation via a custom CUDA implementation (using CUB `DeviceScan`)
 
-- [ ] More `PoissonBase` models (e.g., piecewise constant, splines, etc.)
+- [x] Piecewise constant `PoissonBase` model (`PoissonPiecewise`)
+
+- [ ] More `PoissonBase` models (e.g., splines, etc.)
 
 - [ ] API documentation 
 
