@@ -13,22 +13,24 @@ A PyTorch library for learning multivariate Hawkes processes, with a focus on **
 ## Overview
 
 This library is designed around **multivariate linear exponential Hawkes processes**, which have intensity functions of the form:
-```math
+<!-- $$
 \lambda_p(t) = \textcolor{red}{\mu_p(t)} + \sum_{j: t_j < t} \sum_{k=1}^K \textcolor{green}{\alpha_{p, m_j,k}}\textcolor{blue}{\gamma_k} e^{-\textcolor{blue}{\gamma_k}(t - t_j)}
-```
+$$ --> 
+
+<div align="center"><img src="svg/mf10O0WwDD.svg"></div>
 
 <br>
 
 | Symbol | Description |
 |--------|-------------|
-| $\textcolor{red}{\mu_p(t)}$ | Base intensity of node $p$ at time $t$ (a Poisson process) |
-| $\textcolor{green}{\alpha_{p, q, k}}$ | Influence of node $q$ on node $p$ on timescale $k$ |
-| $\textcolor{blue}{\gamma_k}$ | Decay rate of timescale $k$ |
-| $N$ | Number of events in the sequence |
-| $M$ | Number of dimensions (nodes) in the process |
-| $K$ | Number of kernels (timescales of influence) |
-| $t_i \in [0, T]$ | Time of the $i$-th event |
-| $m_i \in \{1,\dots,M\}$ | Dimension (node type) of event $i$ |
+| <!-- $\textcolor{red}{\mu_p(t)}$ --> <img style="transform: translateY(0.1em);" src="svg/2Gxo9ysjtv.svg"> | Base intensity of node <!-- $p$ --> <img style="transform: translateY(0.1em);" src="svg/RlMvXZmEiQ.svg"> at time <!-- $t$ --> <img style="transform: translateY(0.1em);" src="svg/tY7P4yabM8.svg"> (a Poisson process) |
+| <!-- $\textcolor{green}{\alpha_{p, q, k}}$ --> <img style="transform: translateY(0.1em);" src="svg/GybAYZiPAJ.svg"> | Influence of node <!-- $q$ --> <img style="transform: translateY(0.1em);" src="svg/g3h1QzBEe4.svg"> on node <!-- $p$ --> <img style="transform: translateY(0.1em);" src="svg/zQIYaR13s2.svg"> on timescale <!-- $k$ --> <img style="transform: translateY(0.1em);" src="svg/cV1Ng2jzd0.svg"> |
+| <!-- $\textcolor{blue}{\gamma_k}$ --> <img style="transform: translateY(0.1em);" src="svg/gvYpL9iSbo.svg"> | Decay rate of timescale <!-- $k$ --> <img style="transform: translateY(0.1em);" src="svg/K11wBYJfpf.svg"> |
+| <!-- $N$ --> <img style="transform: translateY(0.1em);" src="svg/rbTQjxY4Xi.svg"> | Number of events in the sequence |
+| <!-- $M$ --> <img style="transform: translateY(0.1em);" src="svg/HfObpVl1n6.svg"> | Number of dimensions (nodes) in the process |
+| <!-- $K$ --> <img style="transform: translateY(0.1em);" src="svg/eiunNoxW0S.svg"> | Number of kernels (timescales of influence) |
+| <!-- $t_i \in [0, T]$ --> <img style="transform: translateY(0.1em);" src="svg/YN9gD29LIg.svg"> | Time of the <!-- $i$ --> <img style="transform: translateY(0.1em);" src="svg/QDLHDzWk9m.svg">-th event |
+| <!-- $m_i \in \{1,\dots,M\}$ --> <img style="transform: translateY(0.1em);" src="svg/mWfEKHchpf.svg"> | Dimension (node type) of event <!-- $i$ --> <img style="transform: translateY(0.1em);" src="svg/KYXUrFdk8V.svg"> |
 
 <br>
 
@@ -40,7 +42,7 @@ We implement a highly parallel algorithm for fitting Hawkes processes via **exac
 <img src="./docs/scaling_curves.png">
 <figcaption style="text-align: center;">
 
-Per-epoch time (left) and memory usage (right) on an Nvidia A100 GPU with $K=3$.
+Per-epoch time (left) and memory usage (right) on an Nvidia A100 GPU with <!-- $K=3$ --> <img style="transform: translateY(0.1em);" src="svg/v2uIzreh1t.svg">.
 
 </figcaption>
 </figure>
@@ -132,9 +134,9 @@ Arrows indicate inheritance, diamonds indicate composition.
 
 Most functionality is implemented in three main abstract base classes. Subclasses of these implement specific Hawkes and Poisson parameterizations and penalizations, which you can also extend to your own use cases.
 
-- `HawkesBase`: Provides intensity and likelihood computation, as well as `fit` and `simulate` methods. Subclasses implement custom parameterizations of $\textcolor{green}{\alpha_{p, q, k}}$ and $\textcolor{blue}{\gamma_k}$, e.g., low-rank, sparse, etc.
+- `HawkesBase`: Provides intensity and likelihood computation, as well as `fit` and `simulate` methods. Subclasses implement custom parameterizations of <!-- $\textcolor{green}{\alpha_{p, q, k}}$ --> <img style="transform: translateY(0.1em);" src="svg/sFgxspH9FI.svg"> and <!-- $\textcolor{blue}{\gamma_k}$ --> <img style="transform: translateY(0.1em);" src="svg/poumHIgalA.svg">, e.g., low-rank, sparse, etc.
 
-- `PoissonBase`: Represents the base rate $\textcolor{red}{\mu_p(t)}$ and is used in `HawkesBase` via the `base_process` attribute. Also provides standalone `fit` and `simulate` methods, if raw Poisson fitting is desired. Subclasses implement custom parameterizations of the time-varying base rate.
+- `PoissonBase`: Represents the base rate <!-- $\textcolor{red}{\mu_p(t)}$ --> <img style="transform: translateY(0.1em);" src="svg/Uz7Pz4Dxed.svg"> and is used in `HawkesBase` via the `base_process` attribute. Also provides standalone `fit` and `simulate` methods, if raw Poisson fitting is desired. Subclasses implement custom parameterizations of the time-varying base rate.
 
 - `Penalty`: An abstract `dataclass` that represents a regularization term added to the log-likelihood during fitting. Extend this to create custom penalties beyond those already implemented. Penalties are attached to a model via the `penalization` attribute, which accepts a `dataclass` that stores `Penalty` instances for each parameter.
 
