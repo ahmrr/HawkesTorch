@@ -65,8 +65,34 @@ Since this library is under active development, it will be updated frequently to
 pip install git+https://github.com/ahmrr/HawkesTorch
 ```
 
-Alternatively, you can add this repo as a submodule to your project if you
-want to modify the source.
+If you want to install from a local copy of the repo and/or modify the source code, clone it and run in the repo root directory:
+
+```bash
+pip install -e .
+```
+
+Python source edits take effect immediately with an editable installation.
+
+### Faster CUDA/CUB prefix scan
+
+By default, the library implements a PyTorch Blelloch scan that works both on CPU and CUDA out-of-the-box with the standard installation. This is also the implementation that we use in our paper to produce all figures and experiments.
+
+However, there is a much faster implementation available that uses NVIDIA's CUB library. To build it during installation, first ensure your PyTorch installation is CUDA-enabled, and install Python build tools (`pip install setuptools wheel`). Then run from the repo root:
+
+```bash
+HAWKES_BUILD_CUB=1 pip install --no-build-isolation .
+```
+
+Add `-e` for an editable installation. Building it requires a compatible CUDA toolkit with `nvcc` and a supported C++ compiler. Make sure to reinstall the package after changing the CUDA source or upgrading PyTorch.
+
+To actually use the CUB scan backend, select CUB in the `RuntimeConfig` that you pass to your Hawkes model:
+
+```python
+from hawkes.utils import config
+
+runtime_config = config.RuntimeConfig(prefix_scan_implementation="cub")
+# Pass runtime_config=runtime_config and device="cuda" to your Hawkes model.
+```
 
 ### Basic Usage
 
@@ -152,7 +178,7 @@ There will be an [API Reference]() available soon with detailed documentation an
 
 ## Future Work
 
-- [ ] Even faster likelihood computation via a custom CUDA implementation (using CUB `DeviceScan`)
+- [x] Faster likelihood computation via an optional CUDA/CUB prefix scan
 
 - [x] Piecewise constant `PoissonBase` model (`PoissonPiecewise`)
 

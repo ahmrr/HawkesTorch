@@ -1,0 +1,6 @@
+recursive-include src/hawkes/utils/csrc *.cu
+prune benchmarks
+prune tests
+prune docs
+prune svg
+global-exclude *.so *.pyd *.dll *.o *.obj

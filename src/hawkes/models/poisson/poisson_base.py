@@ -122,6 +122,13 @@ class PoissonBase(torch.nn.Module, ABC):
 
         return penalty
 
+    def mu_at_events(self, t: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
+        """Intensity of the marked node at each time; subclasses may avoid all-node evaluation."""
+        return self.mu(t).gather(1, m[:, None]).squeeze(1)
+
+    def _active_at_events(self, t: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
+        return (self.t_start[m] <= t) & (t < self.t_end[m])
+
     def integral_mu(
         self,
         t_start: torch.Tensor | float,
@@ -386,12 +393,7 @@ class PoissonBase(torch.nn.Module, ABC):
                     f"t_start ({t_start}) must be less than t_end ({t_end})"
                 )
 
-        # Compute intensities at event times
-        intensities = self.mu(seq.ti)  # Shape: [N, M]
-
-        # Select intensity for the specific event type at each time
-        batch_indices = torch.arange(len(seq.ti), device=seq.ti.device)
-        event_intensities = intensities[batch_indices, seq.mi]
+        event_intensities = self.mu_at_events(seq.ti, seq.mi)
 
         # Add numerical stability
         epsilon = 1e-10

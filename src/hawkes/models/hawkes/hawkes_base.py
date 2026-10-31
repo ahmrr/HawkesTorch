@@ -3,7 +3,7 @@ import time
 import torch
 import typing
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from abc import ABC, abstractmethod
 
 from ... import utils
@@ -66,18 +66,13 @@ class HawkesBase(torch.nn.Module, ABC):
         self.penalization = penalization
 
         self.device = torch.device(device or base_process.device)
-        self.runtime_config = runtime_config
+        self.runtime_config = replace(runtime_config)
         self.logger = logging.getLogger(__name__)
 
         if runtime_config.deterministic_sim:
             # Seed RNGs for reproducible simulations
             torch.manual_seed(42)
             torch.cuda.manual_seed_all(42)
-
-        if runtime_config.prefix_scan_implementation is not None:
-            _torch_scan.PREFIX_SCAN_IMPLEMENTATION = (
-                runtime_config.prefix_scan_implementation
-            )
 
     def state_dict(self, *args, **kwargs):
         """Include the current computed alpha in the saved state dictionary."""
@@ -112,8 +107,7 @@ class HawkesBase(torch.nn.Module, ABC):
     def mu_at_events(self, t: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
         """Base intensity values at event times of shape [N]."""
 
-        mu = self.base_process.mu(t)  # Shape [N, M]
-        return mu.gather(index=m.unsqueeze(1), dim=1).squeeze(1)
+        return self.base_process.mu_at_events(t, m)
 
     @property
     @abstractmethod
@@ -359,18 +353,19 @@ class HawkesBase(torch.nn.Module, ABC):
         batch_size = min(batch_size or seq.N, seq.N)
 
         mu_at_events = self.mu_at_events(seq.ti, seq.mi)
+        alpha, gamma = self.alpha, self.gamma
 
         # Compute log-sum intensity term
 
         nll_log_sum = HawkesLogSumIntensity.apply(
             seq,
             mu_at_events,
-            self.alpha,
-            self.gamma,
+            alpha,
+            gamma,
             self.gamma_param,
             self.intensity_states,
-            self.intensity_at_events,
             batch_size,
+            self.runtime_config.prefix_scan_implementation,
         )
 
         # Compute integral of intensity in [0, T]
@@ -378,8 +373,8 @@ class HawkesBase(torch.nn.Module, ABC):
         base_rate_integral = self.base_process.integral_mu(0, seq.T).sum()
         excitation_integral = HawkesIntegratedExcitation.apply(
             seq,
-            self.alpha,
-            self.gamma,
+            alpha,
+            gamma,
             self.gamma_param,
             batch_size,
         )
@@ -519,7 +514,10 @@ class HawkesBase(torch.nn.Module, ABC):
             )
 
         # Compute prefix products P via scan
-        P = _torch_scan.prefix_scan(M, _torch_scan.state_left_mult, dim=1)
+        P = _torch_scan.prefix_scan(
+            M, _torch_scan.state_left_mult, dim=1,
+            implementation=self.runtime_config.prefix_scan_implementation,
+        )
 
         # Extract non-augmented states
         R = P[:, :, 1:].permute(1, 2, 0)  # Shape: [n, M, K]
@@ -529,7 +527,8 @@ class HawkesBase(torch.nn.Module, ABC):
                 R, dim=1, index=seq.mi[start:end, None, None].expand(-1, 1, self.K)
             )
 
-        return (R, P[:, -1, :]) if next_state else R
+        # A carry must not keep the entire previous batch's scan alive.
+        return (R, P[:, -1, :].clone()) if next_state else R
 
     def intensity_at_events(
         self,
@@ -551,15 +550,13 @@ class HawkesBase(torch.nn.Module, ABC):
             Tensor of shape (N, M) or (N,) giving intensities at each event time.
         """
 
-        mu = self.mu(seq.ti)  # Shape: [N]
-        excitation = torch.sum(self.gamma * states, dim=2)  # Shape: [N, M]
+        if full_intensity:
+            return self.mu(seq.ti) + torch.sum(self.gamma * states, dim=2)
 
-        intensity = mu + excitation
-
-        if not full_intensity:
-            intensity = intensity.gather(dim=1, index=seq.mi.unsqueeze(1)).squeeze(1)
-
-        return intensity
+        if states.shape[1] != 1:
+            states = states.gather(1, seq.mi[:, None, None].expand(-1, 1, self.K))
+        excitation = torch.sum(self.gamma * states.squeeze(1), dim=-1)
+        return self.mu_at_events(seq.ti, seq.mi) + excitation
 
     def rescaled_times(
         self, seq: utils.EventSequence, states: torch.Tensor

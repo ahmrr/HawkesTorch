@@ -43,6 +43,7 @@ class RuntimeConfig:
         detect_anomalies: Set to enable PyTorch anomaly detection during fitting
         use_autograd_gradients: Use PyTorch autograd to compute gradients instead of custom backward
         intensity_implementation: Which implementation to use for intensity computation (general, sequential, parallel)
+        prefix_scan_implementation: Prefix scan backend; cub requires CUDA and the installation-built extension
     """
 
     deterministic_sim: bool = False
@@ -55,7 +56,7 @@ class RuntimeConfig:
     use_autograd_gradients: bool = False
 
     intensity_implementation: Literal["general", "sequential", "parallel"] = "parallel"
-    prefix_scan_implementation: Literal["hillis-steele", "blelloch"] = "blelloch"
+    prefix_scan_implementation: Literal["hillis-steele", "blelloch", "pytorch", "cub"] = "blelloch"
 
 
 @dataclass
