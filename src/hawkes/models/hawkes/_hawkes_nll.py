@@ -12,6 +12,8 @@ torch.use_deterministic_algorithms(False)
 class HawkesLogSumIntensity(torch.autograd.Function):
     """
     Computes the log-sum intensity term in the NLL and its derivatives.
+
+    For learned gamma, saves marked intensity derivatives D rather than R states.
     """
 
     @staticmethod
@@ -31,11 +33,12 @@ class HawkesLogSumIntensity(torch.autograd.Function):
         nll_logsum_term = 0.0
 
         intensity_at_events = mu_at_events.new_empty(seq.N)
-        intensity_states_at_events = (
-            gamma.new_empty(seq.N, 1, K) if gamma_param else None
+        gamma_derivatives_at_events = (
+            gamma.new_empty(seq.N, K) if gamma_param else None
         )
 
         prev_state = None
+        elapsed_prev_state = None
         for batch_start in range(0, seq.N, batch_size):
             batch_end = min(batch_start + batch_size, seq.N)
 
@@ -44,16 +47,33 @@ class HawkesLogSumIntensity(torch.autograd.Function):
                 bounds=(batch_start, batch_end),
                 prev_state=prev_state,
                 next_state=True,
-                full_states=False,
+                full_states=gamma_param,
             )
+
+            if gamma_param:
+                # Q needs every node's R within this batch, before gathering marks.
+                elapsed_states, elapsed_prev_state = _compute_elapsed_time_states(
+                    seq,
+                    gamma,
+                    batch_states,
+                    elapsed_prev_state,
+                    batch_start,
+                    batch_end,
+                    scan_implementation,
+                )
+                batch_states = batch_states.gather(
+                    1, seq.mi[batch_start:batch_end, None, None].expand(-1, 1, K)
+                )
+                # Save only D_i^k = R_i^k[m_i] - gamma_k * Q_i^k[m_i].
+                gamma_derivatives_at_events[batch_start:batch_end] = (
+                    batch_states.squeeze(1) - gamma * elapsed_states
+                )
 
             batch_intensity = mu_at_events[batch_start:batch_end] + (
                 gamma * batch_states.squeeze(1)
             ).sum(dim=-1)
 
             intensity_at_events[batch_start:batch_end] = batch_intensity
-            if gamma_param:
-                intensity_states_at_events[batch_start:batch_end] = batch_states
 
             # Accumulate log intensities
             nll_logsum_term += torch.sum(torch.log(batch_intensity))
@@ -69,7 +89,7 @@ class HawkesLogSumIntensity(torch.autograd.Function):
             alpha,
             gamma,
             intensity_at_events,
-            intensity_states_at_events,
+            gamma_derivatives_at_events,
         )
 
         return nll_logsum_term
@@ -82,14 +102,13 @@ class HawkesLogSumIntensity(torch.autograd.Function):
             alpha,
             gamma,
             intensity_at_events,
-            intensity_states_at_events,
+            gamma_derivatives_at_events,
         ) = ctx.saved_tensors
         seq = utils.EventSequence(
             _ti_saved, _mi_saved, T=ctx.T, M=ctx.M, _validate=False
         )
 
         alpha_prev_state = None
-        gamma_prev_state = None
 
         alpha_grad = torch.zeros_like(alpha)
         gamma_grad = torch.zeros_like(gamma) if ctx.gamma_param else None
@@ -101,7 +120,7 @@ class HawkesLogSumIntensity(torch.autograd.Function):
                 if bs == 0
                 else seq.ti[bs - 1 : be - 1]
             )
-            # Both derivative recurrences use the same decay factors.
+            # The alpha derivative recurrence uses only inter-event times.
             exp_dti = torch.exp(
                 -gamma[:, None, None] * (seq.ti[bs:be] - previous_times)[None, :, None]
             )
@@ -120,20 +139,10 @@ class HawkesLogSumIntensity(torch.autograd.Function):
             alpha_grad += alpha_batch_grad
 
             if ctx.gamma_param:
-                gamma_batch_grad, gamma_prev_state = _compute_gamma_grad(
-                    seq,
-                    alpha,
-                    gamma,
-                    intensity_at_events,
-                    intensity_states_at_events,
-                    gamma_prev_state,
-                    bs,
-                    be,
-                    exp_dti,
-                    previous_times,
-                    ctx.scan_implementation,
-                )
-                gamma_grad += gamma_batch_grad
+                gamma_grad += (
+                    gamma_derivatives_at_events[bs:be]
+                    / intensity_at_events[bs:be, None]
+                ).sum(dim=0)
 
         mu_grad = intensity_at_events.reciprocal()
 
@@ -196,78 +205,47 @@ def _compute_alpha_grad(
     return alpha_grad, alpha_prev_state
 
 
-def _compute_gamma_grad(
+def _compute_elapsed_time_states(
     seq: utils.EventSequence,
-    alpha: torch.Tensor,
     gamma: torch.Tensor,
-    intensity_at_events: torch.Tensor,
-    intensity_states_at_events: torch.Tensor,
-    gamma_prev_state: torch.Tensor,
+    intensity_states: torch.Tensor,
+    prev_state: torch.Tensor | None,
     batch_start: int,
     batch_end: int,
-    exp_dti: torch.Tensor,
-    previous_times: torch.Tensor,
     scan_implementation: str = "blelloch",
 ):
-    K = gamma.shape[0]
-
-    # Convenient shorthand
+    """Return marked Q states and a compact carry for Q_i = d_i Q_{i-1} + dt_i R_i."""
     bs, be = batch_start, batch_end
-    Nb = be - bs
-
-    ti_b, mi_b = seq.ti[bs:be], seq.mi[bs:be]  # Shape: [Nb]
-    intensity_b = intensity_at_events[bs:be]  # Shape: [Nb]
-    intensity_states_b = intensity_states_at_events[bs:be]  # Shape: [Nb, 1, K]
-
-    ti1 = previous_times[None, :, None]
-
-    # α_{m_{i-1}} of shape [K, Nb, M]
-    alpha_mi = (
-        torch.cat(
-            [
-                torch.zeros_like(alpha[:, 0:1, :]),
-                alpha[:, seq.mi[0 : (be - 1)], :],
-            ],
-            dim=1,
-        )
+    previous_times = (
+        torch.cat((seq.ti[:1], seq.ti[: be - 1]))
         if bs == 0
-        else alpha[:, seq.mi[(bs - 1) : (be - 1)], :]
+        else seq.ti[bs - 1 : be - 1]
     )
+    dti = (seq.ti[bs:be] - previous_times)[None, :, None]
+    exp_dti = torch.exp(-gamma[:, None, None] * dti)
 
-    # Build analogous transition matrices for d/dγ terms.
-    M_gamma = torch.cat(
-        [exp_dti, exp_dti * ti1 * alpha_mi], dim=2
-    )  # Shape: [K, Nb, M+1]
-    if gamma_prev_state is not None:
-        M_gamma[:, 0:1, :] = _torch_scan.state_left_mult(
-            gamma_prev_state[:, None, :], M_gamma[:, 0:1, :]
+    # R_i already includes this step's decay. Its age contribution is dt_i * R_i.
+    transitions = torch.cat(
+        (exp_dti, dti * intensity_states.permute(2, 0, 1)), dim=2
+    )  # [K, batch events, M+1]
+    if prev_state is not None:
+        transitions[:, :1, :] = _torch_scan.state_left_mult(
+            prev_state[:, None, :], transitions[:, :1, :]
         )
 
-    P_gamma = _torch_scan.prefix_scan(
-        M_gamma,
+    prefixes = _torch_scan.prefix_scan(
+        transitions,
         _torch_scan.state_left_mult,
         dim=1,
         implementation=scan_implementation,
     )
 
-    gamma_states = P_gamma[:, -Nb:, 1:].permute(1, 2, 0)
-    gamma_prev_state = P_gamma[:, -1, :].clone()
-
-    # Gather the per-event gamma-state and intensity-state for the event's node
-    gamma_states_at_events = torch.gather(
-        gamma_states, dim=1, index=mi_b[:, None, None].expand(-1, 1, K)
-    )  # Shape: [Nb, 1, K]
-
-    # Compose the term required for gamma gradient from log-sum contribution
-    gamma_grad_terms = (
-        gamma * gamma_states_at_events
-        + (1 - gamma * ti_b[:, None, None]) * intensity_states_b
-    )  # Shape: [Nb, 1, K]
-    gamma_grad = torch.sum(
-        gamma_grad_terms.squeeze(1) / intensity_b.unsqueeze(-1), dim=0
-    )  # Shape: [K]
-
-    return gamma_grad, gamma_prev_state
+    states = prefixes[:, :, 1:].permute(1, 2, 0)
+    marked_states = states.gather(
+        1, seq.mi[bs:be, None, None].expand(-1, 1, gamma.shape[0])
+    ).squeeze(1)
+    # A carry must not retain the full previous batch's scan allocation.
+    return marked_states, prefixes[:, -1, :].clone()
 
 
 class HawkesIntegratedExcitation(torch.autograd.Function):
