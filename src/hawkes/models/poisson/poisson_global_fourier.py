@@ -123,6 +123,13 @@ class PoissonGlobalFourier(PoissonBase):
 
         return penalty
 
+    def mu_at_events(self, t: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
+        combined = (
+            self.r0.index_select(0, m)
+            + self.w.index_select(0, m) * self._fourier_series(t)
+        )
+        return self.t.forward(combined) * self._active_at_events(t, m)
+
     def report_parameters(self) -> str:
         r0_vals = self.r0.detach().cpu().numpy()
         w_vals = self.w.detach().cpu().numpy()

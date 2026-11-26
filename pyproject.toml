@@ -10,3 +10,9 @@ dependencies = [
     "torch",
     "matplotlib",
 ]
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["src"]

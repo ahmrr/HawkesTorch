@@ -4,7 +4,7 @@ import torch
 from typing import Callable
 
 
-# Options: "hillis-steele", "blelloch", "pytorch"
+# Default for direct calls; models pass their own runtime configuration.
 PREFIX_SCAN_IMPLEMENTATION = "blelloch"
 
 # TODO: Pad outside of scan function instead of repeatedly inside?
@@ -102,13 +102,14 @@ def _prefix_scan_blelloch(
     )
 
     x = x.movedim(dim, -1)  # Move scan dim to back for convenience
+    x = x.clone()
     other_dims, n = x.shape[:-1], x.shape[-1]
 
     # pad to next power of 2
     L = 2 ** math.ceil(math.log2(n))
     if L - n > 0:
         if isinstance(pad_value, torch.Tensor):
-            pad_seq = pad_value.unsqueeze(-1).expand(*pad_value.shape, N)
+            pad_seq = pad_value.unsqueeze(-1).expand(*pad_value.shape, L - n)
             x = torch.cat([x, pad_seq], dim=-1)
         else:
             x = torch.nn.functional.pad(x, (0, L - n), value=pad_value)
@@ -172,13 +173,36 @@ def prefix_scan(
     op: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
     dim: int = 0,
     pad_value: torch.Tensor | float = 0,
-    identity: torch.Tensor | float = 0,
+    identity: torch.Tensor | float | None = None,
     autograd_safe: bool = False,
+    implementation: str | None = None,
     **kwargs,
 ):
-    """Prefix scan using selected implementation"""
+    """Prefix scan without mutating x, using an explicit backend or the default."""
 
-    if PREFIX_SCAN_IMPLEMENTATION == "hillis-steele":
+    implementation = PREFIX_SCAN_IMPLEMENTATION if implementation is None else implementation
+    if implementation == "cub":
+        if op is not state_left_mult or x.ndim != 3 or dim not in (1, -2):
+            raise ValueError("CUB supports state_left_mult on [K, N, M+1] along dim=1.")
+        if not kwargs.get("inclusive", True):
+            raise ValueError("CUB supports inclusive scans only.")
+        from ._cub_scan import affine_scan
+
+        return affine_scan(x)
+
+    if implementation not in ("hillis-steele", "blelloch", "pytorch"):
+        raise ValueError(f"Unknown prefix scan implementation: {implementation}")
+    if x.size(dim) == 0:
+        return x.clone()
+    if identity is None:
+        if op is state_left_mult:
+            identity = torch.zeros_like(x.select(dim, 0))
+            identity[..., 0] = 1
+        else:
+            identity = 0
+    autograd_safe = autograd_safe or (torch.is_grad_enabled() and x.requires_grad)
+
+    if implementation == "hillis-steele":
         return _prefix_scan_hillis_steele(
             x,
             op,
@@ -186,7 +210,7 @@ def prefix_scan(
             pad_value=pad_value,
             **kwargs,
         )
-    elif PREFIX_SCAN_IMPLEMENTATION == "blelloch":
+    elif implementation == "blelloch":
         return _prefix_scan_blelloch(
             x,
             op,
@@ -196,15 +220,11 @@ def prefix_scan(
             autograd_safe=autograd_safe,
             **kwargs,
         )
-    elif PREFIX_SCAN_IMPLEMENTATION == "pytorch":
+    elif implementation == "pytorch":
         return torch._higher_order_ops.associative_scan(
             op,
             x,
             dim=dim,
             combine_mode="generic",
             **kwargs,
-        )
-    else:
-        raise ValueError(
-            f"Unknown prefix scan implementation: {PREFIX_SCAN_IMPLEMENTATION}"
         )

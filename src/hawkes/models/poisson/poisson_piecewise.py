@@ -297,6 +297,11 @@ class PoissonPiecewise(PoissonBase):
 
         return (mu_vals * durations).sum(dim=-1)  # Shape: (M,)
 
+    def mu_at_events(self, t: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
+        values = self.mu_values
+        indices = m * values.shape[1] + self.bin_index(t)
+        return values.flatten().index_select(0, indices) * self._active_at_events(t, m)
+
     def upper_bound_in_interval(
         self, t_start: torch.Tensor | float, t_end: torch.Tensor | float
     ) -> float:

@@ -137,6 +137,10 @@ class Poisson(PoissonBase):
 
         return mu_vals * duration
 
+    def mu_at_events(self, t: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
+        # index_select avoids the costly advanced-indexing backward for repeated marks.
+        return self.mu_values.index_select(0, m) * self._active_at_events(t, m)
+
     def upper_bound_in_interval(
         self, t_start: torch.Tensor | float, t_end: torch.Tensor | float
     ) -> float:

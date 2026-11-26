@@ -1,4 +1,15 @@
 __pycache__/
+.venv/
+.vscode/
+.ruff_cache/
+.pytest_cache/
+benchmarks/
+build/
+tests/
+dist/
+*.egg-info/
+src/hawkes/utils/_cub_scan_cuda*.so
+src/hawkes/utils/_cub_scan_cuda*.pyd
 
 examples/outputs/*
 # !examples/outputs/plots/*
@@ -10,3 +21,4 @@ todo
 *.pkl
 
 *.old.*
+*.local.*
